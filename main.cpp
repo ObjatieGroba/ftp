@@ -12,11 +12,12 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <netinet/in.h>
-#include <signal.h>
+#include <csignal>
 #include <wait.h>
+#include <security/pam_appl.h>
+#include <security/pam_misc.h>
 
 constexpr unsigned BUF_SIZE = 4096;
-
 
 template <class Handler>
 class Server {
@@ -24,7 +25,7 @@ public:
     Server(uint16_t port, int queue_size = 5) : sock_(socket(AF_INET, SOCK_STREAM, 0)) {
         if (sock_ == -1) {
             throw std::runtime_error("Can not create socket");
-        }
+        }А
         int enable = 1;
         if (setsockopt(sock_, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable)) == -1) {
             close(sock_);
@@ -343,6 +344,7 @@ public:
 
 /// Read till \r\n
 static std::string read_till_end(FDIStream &in) {
+    in.clear();
     std::string res;
     int c;
     bool prev_correct = false;
@@ -382,8 +384,20 @@ template <class F>
 class Noop : public Operation<F> {
 public:
     bool operator()(F &f) override {
-        read_till_end(f.in);
-        SingleLine(f.out, 200) << "OK";
+        if (!read_till_end(f.in).empty()) {
+            MultiLine(f.out, 500) << "Syntax error. Extra data found." << NewLine()
+                                  << "      ,~~.    " << NewLine()
+                                  << "     (  9 )-_," << NewLine()
+                                  << "(\\___ )=='-'  " << NewLine()
+                                  << " \\ .   ) )    " << NewLine()
+                                  << "  \\ `-' /     " << NewLine()
+                                  << "   `~j-'      " << NewLine()
+                                  << "     \"=:      " << NewLine()
+                                  << "--------------" << NewLine()
+                                  << LastLine() << "Krya krya";
+            return true;
+        }
+        SingleLine(f.out, 200) << "OK.";
         return true;
     }
 };
@@ -408,7 +422,7 @@ public:
         if (cnt != 5) {
             out << NewLine{};
         }
-        out << LastLine{} << "Have a nice day dude";
+        out << LastLine{} << "Have a nice day dude!";
         return true;
     }
 };
@@ -417,7 +431,10 @@ template <class F>
 class Quit : public Operation<F> {
 public:
     bool operator()(F &f) override {
-        read_till_end(f.in);
+        if (!read_till_end(f.in).empty()) {
+            SingleLine(f.out, 500) << "Syntax error. Extra data found.";
+            return true;
+        }
         SingleLine(f.out, 221) << "Bye";
         return false;
     }
@@ -428,7 +445,7 @@ class LoginNeed : public Operation<F> {
 public:
     bool operator()(F &f) override {
         read_till_end(f.in);
-        SingleLine(f.out, 530) << "Please log in";
+        SingleLine(f.out, 530) << "Please log in.";
         return true;
     }
 };
@@ -438,7 +455,7 @@ class NoFunc : public Operation<F> {
 public:
     bool operator()(F &f) override {
         read_till_end(f.in);
-        SingleLine(f.out, 530) << "No such function";
+        SingleLine(f.out, 502) << "No such command.";
         return true;
     }
 };
@@ -448,8 +465,15 @@ class Abort : public Operation<F> {
 public:
     bool operator()(F &f) override {
         read_till_end(f.in);
-        f.data_connect.abort();
-        SingleLine(f.out, 10) << "Success";
+        if (f.data_connect.is_ready()) {
+            f.data_connect.abort();
+            SingleLine(f.out, 225) << "Aborted successfully.";
+            return true;
+        }
+        if (f.data_connect.is_done()) {
+            SingleLine(f.out, 502) << "No active data connection.";
+        }
+        SingleLine(f.out, 226) << "Aborted successfully.";
         return true;
     }
 };
@@ -466,37 +490,40 @@ public:
         unsigned h1, h2, h3, h4, p1, p2;
         if (!(f.in >> h1)) {
             read_till_end(f.in);
-            SingleLine(f.out, 530) << "Bad format";
+            SingleLine(f.out, 501) << "Bad format.";
             return true;
         }
         if (f.in.peek() != ',') {
             read_till_end(f.in);
-            SingleLine(f.out, 530) << "Bad format";
+            SingleLine(f.out, 501) << "Bad format.";
             return true;
         }
+        f.in.get();
         if (!(f.in >> h2)) {
             read_till_end(f.in);
-            SingleLine(f.out, 530) << "Bad format";
+            SingleLine(f.out, 501) << "Bad format.";
             return true;
         }
         if (f.in.peek() != ',') {
             read_till_end(f.in);
-            SingleLine(f.out, 530) << "Bad format";
+            SingleLine(f.out, 501) << "Bad format.";
             return true;
         }
+        f.in.get();
         if (!(f.in >> h3)) {
             read_till_end(f.in);
-            SingleLine(f.out, 530) << "Bad format";
+            SingleLine(f.out, 501) << "Bad format.";
             return true;
         }
         if (f.in.peek() != ',') {
             read_till_end(f.in);
-            SingleLine(f.out, 530) << "Bad format";
+            SingleLine(f.out, 501) << "Bad format.";
             return true;
         }
+        f.in.get();
         if (!(f.in >> h4)) {
             read_till_end(f.in);
-            SingleLine(f.out, 530) << "Bad format";
+            SingleLine(f.out, 501) << "Bad format.";
             return true;
         }
         if (f.in.peek() != ',') {
@@ -504,32 +531,38 @@ public:
             SingleLine(f.out, 530) << "Bad format";
             return true;
         }
+        f.in.get();
         if (!(f.in >> p1)) {
             read_till_end(f.in);
-            SingleLine(f.out, 530) << "Bad format";
+            SingleLine(f.out, 501) << "Bad format.";
             return true;
         }
         if (f.in.peek() != ',') {
             read_till_end(f.in);
-            SingleLine(f.out, 530) << "Bad format";
+            SingleLine(f.out, 501) << "Bad format.";
             return true;
         }
+        f.in.get();
         if (!(f.in >> p2)) {
             read_till_end(f.in);
-            SingleLine(f.out, 530) << "Bad format";
+            SingleLine(f.out, 501) << "Bad format.";
             return true;
         }
-        read_till_end(f.in);
+        if (!read_till_end(f.in).empty()) {
+            SingleLine(f.out, 501) << "Bad format. Extra data found.";
+        }
         unsigned ip = (h1 << 24u) + (h2 << 16u) + (h3 << 8u) + h4;
         unsigned port = (p1 << 8u) + p2;
         if (!f.create_data_connect_out(ip, port)) {
-            SingleLine(f.out, 530) << "ERROR";
+            SingleLine(f.out, 500) << "Connection error.";
             return true;
         }
-        SingleLine(f.out, 227) << "Success";
+        SingleLine(f.out, 200) << "Success.";
         return true;
     }
 };
+
+/// TODO From here
 
 template <class F>
 class Pasv : public Operation<F> {
@@ -558,8 +591,7 @@ class List : public Operation<F> {
 public:
     bool operator()(F &f) override {
         path = read_till_end(f.in);
-        if (!f.data_connect.is_ok()) {
-            SingleLine(f.out, 0) << "Open connection firstly by PASV or PORT.";
+        if (!f.check_data_connect()) {
             return true;
         }
         if (!f.data_connect.process(this)) {
@@ -586,7 +618,10 @@ class Retr : public Operation<F> {
 public:
     bool operator()(F &f) override {
         path = read_till_end(f.in);
-        if (!f.data_connect.is_ok()) {
+        if (!f.check_data_connect()) {
+            return true;
+        }
+        if (!f.data_connect.is_ready()) {
             SingleLine(f.out, 0) << "Open connection firstly by PASV or PORT.";
             return true;
         }
@@ -615,8 +650,7 @@ class Stor : public Operation<F> {
 public:
     bool operator()(F &f) override {
         path = read_till_end(f.in);
-        if (!f.data_connect.is_ok()) {
-            SingleLine(f.out, 0) << "Open connection firstly by PASV or PORT.";
+        if (!f.check_data_connect()) {
             return true;
         }
         if (path.empty()) {
@@ -644,8 +678,7 @@ class Sleep : public Operation<F> {
 public:
     bool operator()(F &f) override {
         auto path = read_till_end(f.in);
-        if (!f.data_connect.is_ok()) {
-            SingleLine(f.out, 0) << "Open connection firstly by PASV or PORT.";
+        if (!f.check_data_connect()) {
             return true;
         }
         if (!f.data_connect.process(this)) {
@@ -683,6 +716,15 @@ void read_db(const std::string &filename) {
     }
 }
 
+// Global? Yes, it is.
+pam_response *reply{};
+
+int function_conversation(int num_msg, const struct pam_message **msg,
+                          struct pam_response **resp, void *appdata_ptr) {
+    *resp = reply;
+    return PAM_SUCCESS;
+}
+
 template <class F>
 class Pass : public Operation<F> {
     bool check_password(const std::string &user, const std::string &pass) const {
@@ -696,23 +738,54 @@ class Pass : public Operation<F> {
         return it->second == pass;
     }
 
+    bool check_password_pam(const std::string &user_id, std::string &pass) const {
+        if (user_id == "anonymous") {
+            return true;
+        }
+        auto it = passes.find(user_id);
+        if (it == passes.end()) {
+            return false;
+        }
+        std::stringstream ss;
+        run_command("getent passwd " + user_id + " | cut -d: -f1", ss);
+        auto user = ss.str();
+        std::cout << user << std::endl;
+        user[user.size() - 1] = '\0';
+
+        pam_handle_t *local_auth_handle = nullptr;
+        const pam_conv local_conversation = { function_conversation, nullptr };
+        int retval = pam_start("common-auth", user.c_str(), &local_conversation, &local_auth_handle);
+        if (retval != PAM_SUCCESS) {
+            return false;
+        }
+        reply = (pam_response*)malloc(sizeof(*reply));
+        reply->resp = (char*)malloc(pass.size() + 1);
+        memcpy(reply->resp, pass.data(), pass.size());
+        reply->resp[pass.size()] = '\0';
+        reply->resp_retcode = 0;
+        retval = pam_authenticate(local_auth_handle, 0);
+        pam_end(local_auth_handle, retval);
+        return retval == PAM_SUCCESS;
+    }
+
 public:
     bool operator()(F &f) override {
         auto password = read_till_end(f.in);
-        if (check_password(f.username, password)) {
+        if (check_password_pam(f.username, password)) {
             f.functions.erase("PASS");
             f.functions["PORT"] = std::make_unique<Port<F>>();
             f.functions["PASV"] = std::make_unique<Pasv<F>>();
+            f.functions["ABOR"] = std::make_unique<Abort<F>>();
 
+            f.functions["NOOP"] = std::make_unique<Noop<F>>();
             f.functions["LIST"] = std::make_unique<List<F>>();
             f.functions["RETR"] = std::make_unique<Retr<F>>();
             f.functions["STOR"] = std::make_unique<Stor<F>>();
-
-            f.functions["ABOR"] = std::make_unique<Abort<F>>();
             f.functions["SLEEP"] = std::make_unique<Sleep<F>>();
             f.default_function = std::make_unique<NoFunc<F>>();
-            SingleLine(f.out, 230) << "Success";
+            SingleLine(f.out, 230) << "Success.";
         }
+        SingleLine(f.out, 530) << "Access denied.";
         return true;
     }
 };
@@ -723,13 +796,68 @@ public:
     bool operator()(F &f) override {
         f.username = read_till_end(f.in);
         SingleLine(f.out, 331) << "Need password";
+        f.functions.clear();
         f.functions["PASS"] = std::make_unique<Pass<F>>();
+        f.functions["USER"] = std::make_unique<User<F>>();
+        f.functions["HELP"] = std::make_unique<Help<F>>();
+        f.functions["QUIT"] = std::make_unique<Quit<F>>();
         return true;
     }
 };
 
 template <class F>
 class DataConnect {
+    enum class State {
+        kNone = 0,
+        kReadyIn,
+        kReadyOut,
+        kExecution,
+    };
+
+    int uid = -1;
+    unsigned ip{};
+    unsigned port{};
+    State state = State::kNone;
+
+    int child_;
+public:
+    DataConnect() = default;
+
+    bool is_ready() {
+        return state != State::kNone;
+    }
+
+    bool process(Operation<F>* op) {
+        /// @TODO uid
+        if (!is_ready()) {
+            throw std::runtime_error("Not valid process");
+        }
+        auto pid = fork();
+        if (pid < 0) {
+            return false;
+        }
+        if (pid == 0) {
+            if (uid != -1) {
+                if (setuid(uid) != 0) {
+                    exit(5);
+                }
+            }
+            conn_ = open_connection();
+            if (!op->process(conn_)) {
+                std::cerr << "Internal error" << std::endl;
+                exit(1);
+            }
+            exit(0);
+        } else {
+            child_ = pid;
+            state = State::kExecution;
+        }
+        return true;
+    }
+};
+
+template <class F>
+class DataConnectOld {
 public:
     DataConnect() = default;
 
@@ -757,7 +885,7 @@ public:
         }
     }
 
-    bool is_ok() {
+    bool is_ready() {
         return conn_ != -1;
     }
 
@@ -774,29 +902,6 @@ public:
         return ::kill(child_, 0) != 0;
     }
 
-    bool process(Operation<F>* op) {
-        /// @TODO uid
-        if (!is_ok()) {
-            throw std::runtime_error("Not valid process");
-        }
-        auto pid = fork();
-        if (pid < 0) {
-            return false;
-        }
-        if (pid == 0) {
-            if (!op->process(conn_)) {
-                std::cerr << "ERROR" << std::endl;
-            }
-            exit(0);
-        } else {
-            child_ = pid;
-            close(conn_);
-            conn_ = -1;
-            server_.reset();
-        }
-        return true;
-    }
-
     void kill() {
         if (child_ == -1) {
             return;
@@ -806,13 +911,16 @@ public:
         std::cout << waitpid(child_, &status, 0) << '-' << status << std::endl;
     }
 
-    void abort() {
+    bool abort() {
         if (conn_ != -1) {
             close(conn_);
             conn_ = -1;
             server_.reset();
+            kill();
+            return true;
         }
         kill();
+        return false;
     }
 
     void set_server(Server<int> &&s) {
@@ -862,6 +970,18 @@ public:
     }
 
     bool create_data_connect_in(unsigned port);
+
+    bool check_data_connect() {
+        if (data_connect.is_ready()) {
+            return true;
+        }
+        if (data_connect.is_done()) {
+            SingleLine(out, 425) << "Open data connection firstly by PASV or PORT.";
+            return false;
+        }
+        SingleLine(out, 125) << "Data connection already open; transferring started.";
+        return false;
+    }
 
 //
 //    bool type() {
