@@ -4,6 +4,8 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <sstream>
+#include <fstream>
 
 #include <unistd.h>
 #include <sys/types.h>
@@ -19,7 +21,7 @@ constexpr unsigned BUF_SIZE = 4096;
 template <class Handler>
 class Server {
 public:
-    Server(uint16_t port) : sock_(socket(AF_INET, SOCK_STREAM, 0)) {
+    Server(uint16_t port, int queue_size = 5) : sock_(socket(AF_INET, SOCK_STREAM, 0)) {
         if (sock_ == -1) {
             throw std::runtime_error("Can not create socket");
         }
@@ -36,17 +38,17 @@ public:
             close(sock_);
             throw std::runtime_error("Can not bind");
         }
-        if (listen(sock_, 5) == -1) {
+        if (listen(sock_, queue_size) == -1) {
             close(sock_);
             throw std::runtime_error("Can not listen");
         }
     }
 
-    Server(Server &&other) : sock_(other.sock_) {
+    Server(Server &&other) noexcept : sock_(other.sock_) {
         other.sock_ = -1;
     }
 
-    Server& operator=(Server &&other) {
+    Server& operator=(Server &&other) noexcept {
         sock_ = other.sock_;
         other.sock_ = -1;
         return *this;
@@ -98,6 +100,10 @@ public:
 
     int dismiss() {
         need_close = false;
+        return fd_;
+    }
+
+    int get_fd() const {
         return fd_;
     }
 
@@ -184,22 +190,22 @@ protected:
             return EOF;
         }
         return in_buf_[in_cur_++];
-    };
+    }
 
     std::streamsize showmanyc() final {
         throw std::runtime_error("Not implemented");
-    };
+    }
 
     int pbackfail(int c) final {
         throw std::runtime_error("Not implemented");
-    };
+    }
 
 private:
     int fd_;
     bool need_close = true;
     int in_cur_ = 0, in_size_ = 0, out_size_ = 0;
-    std::array<char, BUF_SIZE> in_buf_;
-    std::array<char, BUF_SIZE> out_buf_;
+    std::array<char, BUF_SIZE> in_buf_{};
+    std::array<char, BUF_SIZE> out_buf_{};
 };
 
 class FDOStream : public std::ostream {
@@ -212,6 +218,10 @@ public:
 
     int dismiss() {
         return buf_.dismiss();
+    }
+
+    int get_fd() const {
+        return buf_.get_fd();
     }
 };
 
@@ -226,10 +236,27 @@ public:
     int dismiss() {
         return buf_.dismiss();
     }
+
+    int get_fd() const {
+        return buf_.get_fd();
+    }
 };
 
-bool run_command(const std::string &cmd, FDOStream &out) {
-    std::array<char, 4096> buf;
+bool set_timeout_fd(int fd, int type, int seconds=30) {
+    struct timeval timeout{seconds, 0};
+    return setsockopt(fd, SOL_SOCKET, type, (char *)&timeout, sizeof(timeout)) != -1;
+}
+
+bool run_command(const std::string &cmd, std::ostream &out) {
+    {
+        FDOStream *s;
+        if ((s = dynamic_cast<FDOStream *>(&out)) != nullptr) {
+            if (!set_timeout_fd(s->get_fd(), SO_SNDTIMEO)) {
+                return false;
+            }
+        }
+    }
+    std::array<char, 4096> buf{};
     FILE *file;
     if ((file = popen(cmd.c_str(), "r")) != nullptr) {
         size_t read;
@@ -241,6 +268,23 @@ bool run_command(const std::string &cmd, FDOStream &out) {
         return true;
     }
     return false;
+}
+
+bool write_file(const std::string &filename, FDIStream &in) {
+    if (!set_timeout_fd(in.get_fd(), SO_RCVTIMEO)) {
+        return false;
+    }
+    std::ofstream file;
+    file.open(filename, std::ios_base::out);
+    if (!file) {
+        return false;
+    }
+    std::copy(std::istreambuf_iterator<char>(in),
+              std::istreambuf_iterator<char>(),
+              std::ostreambuf_iterator<char>(file)
+    );
+    file.close();
+    return true;
 }
 
 class SingleLine {
@@ -421,41 +465,61 @@ public:
         }
         unsigned h1, h2, h3, h4, p1, p2;
         if (!(f.in >> h1)) {
-            ;
+            read_till_end(f.in);
+            SingleLine(f.out, 530) << "Bad format";
+            return true;
         }
         if (f.in.peek() != ',') {
-            ;
+            read_till_end(f.in);
+            SingleLine(f.out, 530) << "Bad format";
+            return true;
         }
         if (!(f.in >> h2)) {
-            ;
+            read_till_end(f.in);
+            SingleLine(f.out, 530) << "Bad format";
+            return true;
         }
         if (f.in.peek() != ',') {
-            ;
+            read_till_end(f.in);
+            SingleLine(f.out, 530) << "Bad format";
+            return true;
         }
         if (!(f.in >> h3)) {
-            ;
+            read_till_end(f.in);
+            SingleLine(f.out, 530) << "Bad format";
+            return true;
         }
         if (f.in.peek() != ',') {
-            ;
+            read_till_end(f.in);
+            SingleLine(f.out, 530) << "Bad format";
+            return true;
         }
         if (!(f.in >> h4)) {
-            ;
+            read_till_end(f.in);
+            SingleLine(f.out, 530) << "Bad format";
+            return true;
         }
         if (f.in.peek() != ',') {
-            ;
+            read_till_end(f.in);
+            SingleLine(f.out, 530) << "Bad format";
+            return true;
         }
         if (!(f.in >> p1)) {
-            ;
+            read_till_end(f.in);
+            SingleLine(f.out, 530) << "Bad format";
+            return true;
         }
         if (f.in.peek() != ',') {
-            ;
+            read_till_end(f.in);
+            SingleLine(f.out, 530) << "Bad format";
+            return true;
         }
         if (!(f.in >> p2)) {
-            ;
+            read_till_end(f.in);
+            SingleLine(f.out, 530) << "Bad format";
+            return true;
         }
-        if (!read_till_end(f.in).empty()) {
-            ;
-        }
+        read_till_end(f.in);
         unsigned ip = (h1 << 24u) + (h2 << 16u) + (h3 << 8u) + h4;
         unsigned port = (p1 << 8u) + p2;
         if (!f.create_data_connect_out(ip, port)) {
@@ -476,7 +540,7 @@ public:
             SingleLine(f.out, 530) << "Already running other";
             return true;
         }
-        unsigned port = 10000 + rand() % 10;
+        unsigned port = 10000;// + rand() % 10;
         std::cout << port << std::endl;
         SingleLine(f.out, 227) << "Passive mode (0,0,0,0,"
                            << (port >> 8u) << ',' << (port & ((1u << 8u) - 1)) << ")";
@@ -493,7 +557,7 @@ template <class F>
 class List : public Operation<F> {
 public:
     bool operator()(F &f) override {
-        auto path = read_till_end(f.in);
+        path = read_till_end(f.in);
         if (!f.data_connect.is_ok()) {
             SingleLine(f.out, 0) << "Open connection firstly by PASV or PORT.";
             return true;
@@ -508,8 +572,71 @@ public:
 
     bool process(int fd) override {
         FDOStream out(fd);
-        return run_command("ls -la", out);
+        if (path.empty()) {
+            return run_command("ls -la ", out);
+        }
+        return run_command("ls -la " + path, out);
     }
+
+    std::string path;
+};
+
+template <class F>
+class Retr : public Operation<F> {
+public:
+    bool operator()(F &f) override {
+        path = read_till_end(f.in);
+        if (!f.data_connect.is_ok()) {
+            SingleLine(f.out, 0) << "Open connection firstly by PASV or PORT.";
+            return true;
+        }
+        if (path.empty()) {
+            SingleLine(f.out, 0) << "Path should be specified";
+            return true;
+        }
+        if (!f.data_connect.process(this)) {
+            SingleLine(f.out, 0) << ":(";
+            return true;
+        }
+        SingleLine(f.out, 0) << "Success";
+        return true;
+    }
+
+    bool process(int fd) override {
+        FDOStream out(fd);
+        return run_command("cat " + path, out);
+    }
+
+    std::string path;
+};
+
+template <class F>
+class Stor : public Operation<F> {
+public:
+    bool operator()(F &f) override {
+        path = read_till_end(f.in);
+        if (!f.data_connect.is_ok()) {
+            SingleLine(f.out, 0) << "Open connection firstly by PASV or PORT.";
+            return true;
+        }
+        if (path.empty()) {
+            SingleLine(f.out, 0) << "Path should be specified";
+            return true;
+        }
+        if (!f.data_connect.process(this)) {
+            SingleLine(f.out, 0) << ":(";
+            return true;
+        }
+        SingleLine(f.out, 0) << "Success";
+        return true;
+    }
+
+    bool process(int fd) override {
+        FDIStream in(fd);
+        return write_file(path, in);
+    }
+
+    std::string path;
 };
 
 template <class F>
@@ -535,24 +662,56 @@ public:
     }
 };
 
+std::map<std::string, std::string> passes;
+
+void read_db(const std::string &filename) {
+    passes.clear();
+    std::ifstream file;
+    file.open(filename, std::ios_base::in);
+    std::string line;
+    std::getline(file, line);
+    while (!file.eof()) {
+        std::getline(file, line);
+        if (line.back() == '\n') {
+            line.pop_back();
+        }
+        auto pos = line.find('\t');
+        if (line.find('\t', pos + 1) != std::string::npos) {
+            throw std::runtime_error("Bad file format");
+        }
+        passes[line.substr(0, pos)] = line.substr(pos + 1);
+    }
+}
+
 template <class F>
 class Pass : public Operation<F> {
+    bool check_password(const std::string &user, const std::string &pass) const {
+        if (user == "anonymous") {
+            return true;
+        }
+        auto it = passes.find(user);
+        if (it == passes.end()) {
+            return false;
+        }
+        return it->second == pass;
+    }
+
 public:
     bool operator()(F &f) override {
         auto password = read_till_end(f.in);
-        if (f.username == "anonymous") {
-            f.functions.clear();
-            f.functions["HELP"] = std::make_unique<Help<F>>();
-            f.functions["QUIT"] = std::make_unique<Quit<F>>();
-            f.functions["NOOP"] = std::make_unique<Noop<F>>();
+        if (check_password(f.username, password)) {
+            f.functions.erase("PASS");
             f.functions["PORT"] = std::make_unique<Port<F>>();
             f.functions["PASV"] = std::make_unique<Pasv<F>>();
+
             f.functions["LIST"] = std::make_unique<List<F>>();
+            f.functions["RETR"] = std::make_unique<Retr<F>>();
+            f.functions["STOR"] = std::make_unique<Stor<F>>();
+
             f.functions["ABOR"] = std::make_unique<Abort<F>>();
             f.functions["SLEEP"] = std::make_unique<Sleep<F>>();
             f.default_function = std::make_unique<NoFunc<F>>();
             SingleLine(f.out, 230) << "Success";
-            return true;
         }
         return true;
     }
@@ -576,7 +735,7 @@ public:
 
     explicit DataConnect(int conn) : conn_(conn) { };
 
-    DataConnect& operator=(DataConnect &&other) {
+    DataConnect& operator=(DataConnect &&other) noexcept {
         kill();
         if (conn_ != -1) {
             close(conn_);
@@ -751,7 +910,7 @@ public:
 
 bool FTP::create_data_connect_in(unsigned port) {
     try {
-        Server<int> server(port);
+        Server<int> server(port, 1);
         auto client = server.accept_one();
         if (client < 0) {
             return false;
@@ -766,5 +925,6 @@ bool FTP::create_data_connect_in(unsigned port) {
 
 
 int main() {
+    read_db("../passes");
     Server<FTP>(8080).run();
 }
