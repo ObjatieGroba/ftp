@@ -17,7 +17,7 @@
 #include <security/pam_appl.h>
 #include <security/pam_misc.h>
 
-constexpr unsigned BUF_SIZE = 4096;
+constexpr unsigned BUF_SIZE = 1024;
 
 template <class Handler>
 class Server {
@@ -25,7 +25,7 @@ public:
     Server(uint16_t port, int queue_size = 5) : sock_(socket(AF_INET, SOCK_STREAM, 0)) {
         if (sock_ == -1) {
             throw std::runtime_error("Can not create socket");
-        }А
+        }
         int enable = 1;
         if (setsockopt(sock_, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable)) == -1) {
             close(sock_);
@@ -117,7 +117,13 @@ protected:
         if (out_size_== 0) {
             return 0;
         }
-        if (send(fd_, out_buf_.data(), out_size_, 0) != out_size_) {
+        int res;
+        do {
+            errno = 0;
+            res = send(fd_, out_buf_.data(), out_size_, 0);
+        } while (res == -1 && errno == EINTR);
+        if (res != out_size_) {
+            std::cerr << res << ' ' << errno << std::endl;
             throw std::runtime_error("Can not write to fd");
         }
         out_size_ = 0;
@@ -135,7 +141,13 @@ protected:
                 out_size_ += can_write;
             }
             if (out_size_ == out_buf_.size()) {
-                if (send(fd_, out_buf_.data(), out_size_, 0) != out_size_) {
+                int res;
+                do {
+                    errno = 0;
+                    res = send(fd_, out_buf_.data(), out_size_, 0);
+                } while (res == -1 && errno == EINTR);
+                if (res != out_size_) {
+                    std::cerr << res << ' ' << errno << std::endl;
                     throw std::runtime_error("Can not write to fd");
                 }
                 out_size_ = 0;
@@ -156,9 +168,13 @@ protected:
                     in_cur_ += can_read;
                 }
             } else {
-                in_size_ = recv(fd_, in_buf_.data(), in_buf_.size(), 0);
+                do {
+                    errno = 0;
+                    in_size_ = recv(fd_, in_buf_.data(), in_buf_.size(), 0);
+                } while (in_size_ == -1 && errno == EINTR);
                 in_cur_ = 0;
                 if (in_size_ == -1) {
+                    std::cerr << errno << std::endl;
                     throw std::runtime_error("Can not read from fd");
                 }
             }
@@ -170,9 +186,13 @@ protected:
         if (in_cur_ != in_size_) {
             return in_buf_[in_cur_];
         }
-        in_size_ = recv(fd_, in_buf_.data(), in_buf_.size(), 0);
+        do {
+            errno = 0;
+            in_size_ = recv(fd_, in_buf_.data(), in_buf_.size(), 0);
+        } while (in_size_ == -1 && errno == EINTR);
         in_cur_ = 0;
         if (in_size_ == -1) {
+            std::cerr << errno << std::endl;
             throw std::runtime_error("Can not read from fd");
         }
         return in_buf_[in_cur_];
@@ -182,9 +202,13 @@ protected:
         if (in_cur_ != in_size_) {
             return in_buf_[in_cur_++];
         }
-        in_size_ = recv(fd_, in_buf_.data(), in_buf_.size(), 0);
+        do {
+            errno = 0;
+            in_size_ = recv(fd_, in_buf_.data(), in_buf_.size(), 0);
+        } while (in_size_ == -1 && errno == EINTR);
         in_cur_ = 0;
         if (in_size_ == -1) {
+            std::cerr << errno << std::endl;
             throw std::runtime_error("Can not read from fd");
         }
         if (in_size_ == 0) {
@@ -243,7 +267,7 @@ public:
     }
 };
 
-bool set_timeout_fd(int fd, int type, int seconds=30) {
+bool set_timeout_fd(int fd, int type, int seconds=60) {
     struct timeval timeout{seconds, 0};
     return setsockopt(fd, SOL_SOCKET, type, (char *)&timeout, sizeof(timeout)) != -1;
 }
@@ -465,13 +489,13 @@ class Abort : public Operation<F> {
 public:
     bool operator()(F &f) override {
         read_till_end(f.in);
-        if (f.data_connect.is_ready()) {
-            f.data_connect.abort();
-            SingleLine(f.out, 225) << "Aborted successfully.";
-            return true;
-        }
         if (f.data_connect.is_done()) {
             SingleLine(f.out, 502) << "No active data connection.";
+        }
+        f.data_connect.kill();
+        if (f.data_connect.is_ready()) {
+            SingleLine(f.out, 225) << "Aborted successfully.";
+            return true;
         }
         SingleLine(f.out, 226) << "Aborted successfully.";
         return true;
@@ -484,7 +508,7 @@ public:
     bool operator()(F &f) override {
         if (!f.data_connect.is_done()) {
             read_till_end(f.in);
-            SingleLine(f.out, 530) << "Already running other";
+            SingleLine(f.out, 500) << "Already running other";
             return true;
         }
         unsigned h1, h2, h3, h4, p1, p2;
@@ -528,7 +552,7 @@ public:
         }
         if (f.in.peek() != ',') {
             read_till_end(f.in);
-            SingleLine(f.out, 530) << "Bad format";
+            SingleLine(f.out, 501) << "Bad format";
             return true;
         }
         f.in.get();
@@ -553,8 +577,8 @@ public:
         }
         unsigned ip = (h1 << 24u) + (h2 << 16u) + (h3 << 8u) + h4;
         unsigned port = (p1 << 8u) + p2;
-        if (!f.create_data_connect_out(ip, port)) {
-            SingleLine(f.out, 500) << "Connection error.";
+        if (!f.data_connect.set_active(ip, port)) {
+            SingleLine(f.out, 500) << "Internal error.";
             return true;
         }
         SingleLine(f.out, 200) << "Success.";
@@ -570,18 +594,24 @@ public:
     bool operator()(F &f) override {
         if (!f.data_connect.is_done()) {
             read_till_end(f.in);
-            SingleLine(f.out, 530) << "Already running other";
+            SingleLine(f.out, 500) << "Already running other";
             return true;
         }
         unsigned port = 10000;// + rand() % 10;
         std::cout << port << std::endl;
-        SingleLine(f.out, 227) << "Passive mode (0,0,0,0,"
-                           << (port >> 8u) << ',' << (port & ((1u << 8u) - 1)) << ")";
-        if (!f.create_data_connect_in(port)) {
-            SingleLine(f.out, 530) << "ERROR";
+        try {
+            Server<void> server(port, 1);
+            if (!f.data_connect.set_passive(std::move(server))) {
+                SingleLine(f.out, 500) << "Internal error.";
+                return true;
+            }
+        } catch (const std::exception &e) {
+            std::cerr << e.what();
+            SingleLine(f.out, 500) << "Internal error";
             return true;
         }
-        SingleLine(f.out, 227) << "Success";
+        SingleLine(f.out, 227) << "Passive mode (0,0,0,0,"
+                               << (port >> 8u) << ',' << (port & ((1u << 8u) - 1)) << ")";
         return true;
     }
 };
@@ -784,6 +814,7 @@ public:
             f.functions["SLEEP"] = std::make_unique<Sleep<F>>();
             f.default_function = std::make_unique<NoFunc<F>>();
             SingleLine(f.out, 230) << "Success.";
+            return true;
         }
         SingleLine(f.out, 530) << "Access denied.";
         return true;
@@ -811,24 +842,99 @@ class DataConnect {
         kNone = 0,
         kReadyIn,
         kReadyOut,
-        kExecution,
+        kExecution
     };
 
-    int uid = -1;
+    uid_t uid = std::numeric_limits<decltype(uid)>::max();
     unsigned ip{};
     unsigned port{};
     State state = State::kNone;
+    std::optional<Server<void>> server{};
 
-    int child_;
+    pid_t child_ = -1;
+
+    int open_connection() {
+        if (state == State::kReadyOut) {
+            int sock;
+            if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+                return -1;
+            }
+            struct sockaddr_in serv_addr{};
+            serv_addr.sin_family = AF_INET;
+            serv_addr.sin_port = htons(port);
+            serv_addr.sin_addr.s_addr = htonl(ip);
+            if (connect(sock, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) {
+                close(sock);
+                return -1;
+            }
+            return sock;
+        }
+        if (state == State::kReadyIn) {
+             return server->accept_one();
+        }
+        return -1;
+    }
+
 public:
     DataConnect() = default;
 
+    DataConnect(DataConnect &&other) = delete;
+    DataConnect(const DataConnect &other) = delete;
+    DataConnect& operator=(DataConnect &&other) = delete;
+    DataConnect& operator=(const DataConnect &other) = delete;
+//        kill();
+//        if (conn_ != -1) {
+//            close(conn_);
+//        }
+//        conn_ = other.conn_;
+//        other.conn_ = -1;
+//        child_ = other.child_;
+//        other.child_ = -1;
+//        if (other.server_) {
+//            server_ = std::move(other.server_.value());
+//        }
+//        return *this;
+//    }
+
+    ~DataConnect() {
+        kill();
+    }
+
+    void kill() {
+        server.reset();
+        if (child_ == -1) {
+            return;
+        }
+        int st;
+        std::cout << "Kill" << std::endl;
+        std::cout << ::kill(child_, SIGABRT) << '-' << child_ << std::endl;
+        std::cout << waitpid(child_, &st, 0) << '-' << st << std::endl;
+        state = State::kNone;
+        child_ = -1;
+    }
+
     bool is_ready() {
-        return state != State::kNone;
+        return state == State::kReadyIn || state == State::kReadyOut;
+    }
+
+    bool is_done() {
+        if (state == State::kNone) {
+            return true;
+        }
+        if (is_ready()) {
+            return false;
+        }
+        int status;
+        std::cout << waitpid(child_, &status, WNOHANG) << ' ' << status << std::endl;
+        std::cout << ::kill(child_, 0) << ' ' << child_ << std::endl;
+        if (::kill(child_, 0) != 0) {
+            state = State::kNone;
+            return true;
+        }
+        return false;
     }
 
     bool process(Operation<F>* op) {
-        /// @TODO uid
         if (!is_ready()) {
             throw std::runtime_error("Not valid process");
         }
@@ -842,8 +948,12 @@ public:
                     exit(5);
                 }
             }
-            conn_ = open_connection();
-            if (!op->process(conn_)) {
+            int user = open_connection();
+            if (user == -1) {
+                std::cerr << "Can not create user connection" << std::endl;
+                exit(6);
+            }
+            if (!op->process(user)) {
                 std::cerr << "Internal error" << std::endl;
                 exit(1);
             }
@@ -851,86 +961,29 @@ public:
         } else {
             child_ = pid;
             state = State::kExecution;
+            server.reset();
         }
         return true;
     }
-};
 
-template <class F>
-class DataConnectOld {
-public:
-    DataConnect() = default;
-
-    explicit DataConnect(int conn) : conn_(conn) { };
-
-    DataConnect& operator=(DataConnect &&other) noexcept {
-        kill();
-        if (conn_ != -1) {
-            close(conn_);
-        }
-        conn_ = other.conn_;
-        other.conn_ = -1;
-        child_ = other.child_;
-        other.child_ = -1;
-        if (other.server_) {
-            server_ = std::move(other.server_.value());
-        }
-        return *this;
-    }
-
-    ~DataConnect() {
-        kill();
-        if (conn_ != -1) {
-            close(conn_);
-        }
-    }
-
-    bool is_ready() {
-        return conn_ != -1;
-    }
-
-    bool is_done() {
-        if (conn_ != -1) {
+    bool set_passive(Server<void> &&s) {
+        if (state != State::kNone) {
             return false;
         }
-        if (child_ == -1) {
-            return true;
+        server = std::move(s);
+        state = State::kReadyIn;
+        return true;
+    }
+
+    bool set_active(unsigned ip_, unsigned port_) {
+        if (state != State::kNone) {
+            return false;
         }
-        int status;
-        std::cout << waitpid(child_, &status, WNOHANG) << ' ' << status << std::endl;
-        std::cout << ::kill(child_, 0) << ' ' << child_ << std::endl;
-        return ::kill(child_, 0) != 0;
+        ip = ip_;
+        port = port_;
+        state = State::kReadyOut;
+        return true;
     }
-
-    void kill() {
-        if (child_ == -1) {
-            return;
-        }
-        int status;
-        std::cout << ::kill(child_, SIGABRT) << '-' << child_ << std::endl;
-        std::cout << waitpid(child_, &status, 0) << '-' << status << std::endl;
-    }
-
-    bool abort() {
-        if (conn_ != -1) {
-            close(conn_);
-            conn_ = -1;
-            server_.reset();
-            kill();
-            return true;
-        }
-        kill();
-        return false;
-    }
-
-    void set_server(Server<int> &&s) {
-        server_ = std::move(s);
-    }
-
-private:
-    int conn_ = -1;
-    pid_t child_ = -1;
-    std::optional<Server<int>> server_{};
 };
 
 class FTP {
@@ -938,11 +991,11 @@ public:
     explicit FTP(int fd) : in(fd), out(fd) {
         in.dismiss();
         struct timeval timeout{30, 0};
-        if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout)) == -1) {
+        if (!set_timeout_fd(fd, SO_RCVTIMEO)) {
             close(fd);
             throw std::runtime_error("Can not set rcv timeout");
         }
-        if (setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (char *)&timeout, sizeof(timeout)) == -1) {
+        if (!set_timeout_fd(fd, SO_SNDTIMEO)) {
             close(fd);
             throw std::runtime_error("Can not set snd timeout");
         }
@@ -951,25 +1004,6 @@ public:
         functions["QUIT"] = std::make_unique<Quit<FTP>>();
         default_function = std::make_unique<LoginNeed<FTP>>();
     }
-
-    bool create_data_connect_out(unsigned ip, unsigned port) {
-        int sock;
-        if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-            return false;
-        }
-        struct sockaddr_in serv_addr{};
-        serv_addr.sin_family = AF_INET;
-        serv_addr.sin_port = htons(port);
-        serv_addr.sin_addr.s_addr = htonl(ip);
-        if (connect(sock, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) {
-            close(sock);
-            return false;
-        }
-        data_connect = DataConnect<FTP>{sock};
-        return true;
-    }
-
-    bool create_data_connect_in(unsigned port);
 
     bool check_data_connect() {
         if (data_connect.is_ready()) {
@@ -1020,6 +1054,9 @@ public:
             }
             (*default_function)(*this);
         }
+        if (!in.good()) {
+            SingleLine(out, 421) << "Timeout.";
+        }
     }
 
     FDIStream in;
@@ -1028,23 +1065,12 @@ public:
     DataConnect<FTP> data_connect;
 };
 
-bool FTP::create_data_connect_in(unsigned port) {
-    try {
-        Server<int> server(port, 1);
-        auto client = server.accept_one();
-        if (client < 0) {
-            return false;
-        }
-        data_connect = DataConnect<FTP>{client};
-        data_connect.set_server(std::move(server));
-        return true;
-    } catch (const std::exception &e) {
-        return false;
-    }
-}
+void empty(int signum) { }
 
 
 int main() {
+    signal(SIGPIPE, empty);
+
     read_db("../passes");
     Server<FTP>(8080).run();
 }
