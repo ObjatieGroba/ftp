@@ -16,6 +16,7 @@
 #include <wait.h>
 #include <security/pam_appl.h>
 #include <security/pam_misc.h>
+#include <fcntl.h>
 
 constexpr unsigned BUF_SIZE = 1024;
 
@@ -157,6 +158,7 @@ protected:
     }
 
     std::streamsize xsgetn(char* s, std::streamsize num_) final {
+        std::cerr << "getn" << num_ << "\n";
         int num = num_;
         while (num > 0) {
             if (in_cur_ < in_size_) {
@@ -177,6 +179,10 @@ protected:
                     std::cerr << errno << std::endl;
                     throw std::runtime_error("Can not read from fd");
                 }
+                if (in_size_ == 0) {
+                    /// EOF
+                    return num_;
+                }
             }
         }
         return num_;
@@ -194,6 +200,9 @@ protected:
         if (in_size_ == -1) {
             std::cerr << errno << std::endl;
             throw std::runtime_error("Can not read from fd");
+        }
+        if (in_size_ == 0) {
+            return EOF;
         }
         return in_buf_[in_cur_];
     }
@@ -298,6 +307,13 @@ bool run_command(const std::string &cmd, std::ostream &out) {
 bool write_file(const std::string &filename, FDIStream &in) {
     if (!set_timeout_fd(in.get_fd(), SO_RCVTIMEO)) {
         return false;
+    }
+    {
+        int fd = open(filename.c_str(), O_CREAT, 0600);
+        if (fd == -1) {
+            return false;
+        }
+        close(fd);
     }
     std::ofstream file;
     file.open(filename, std::ios_base::out);
@@ -768,7 +784,7 @@ class Pass : public Operation<F> {
         return it->second == pass;
     }
 
-    bool check_password_pam(const std::string &user_id, std::string &pass) const {
+    bool check_password_pam(const std::string &user_id, std::string &pass, F &f) const {
         if (user_id == "anonymous") {
             return true;
         }
@@ -776,10 +792,16 @@ class Pass : public Operation<F> {
         if (it == passes.end()) {
             return false;
         }
+        if (!std::all_of(user_id.begin(), user_id.end(), [](char c){ return isdigit(c); })) {
+            return false;
+        }
+        auto uid = std::stoi(user_id, nullptr, 10);
+        if (uid < 0) {
+            return false;
+        }
         std::stringstream ss;
         run_command("getent passwd " + user_id + " | cut -d: -f1", ss);
         auto user = ss.str();
-        std::cout << user << std::endl;
         user[user.size() - 1] = '\0';
 
         pam_handle_t *local_auth_handle = nullptr;
@@ -795,13 +817,18 @@ class Pass : public Operation<F> {
         reply->resp_retcode = 0;
         retval = pam_authenticate(local_auth_handle, 0);
         pam_end(local_auth_handle, retval);
+        if (retval == PAM_SUCCESS) {
+            // Update user info
+            f.username = user;
+            f.data_connect.set_uid(uid);
+        }
         return retval == PAM_SUCCESS;
     }
 
 public:
     bool operator()(F &f) override {
         auto password = read_till_end(f.in);
-        if (check_password_pam(f.username, password)) {
+        if (check_password_pam(f.username, password, f)) {
             f.functions.erase("PASS");
             f.functions["PORT"] = std::make_unique<Port<F>>();
             f.functions["PASV"] = std::make_unique<Pasv<F>>();
@@ -882,19 +909,6 @@ public:
     DataConnect(const DataConnect &other) = delete;
     DataConnect& operator=(DataConnect &&other) = delete;
     DataConnect& operator=(const DataConnect &other) = delete;
-//        kill();
-//        if (conn_ != -1) {
-//            close(conn_);
-//        }
-//        conn_ = other.conn_;
-//        other.conn_ = -1;
-//        child_ = other.child_;
-//        other.child_ = -1;
-//        if (other.server_) {
-//            server_ = std::move(other.server_.value());
-//        }
-//        return *this;
-//    }
 
     ~DataConnect() {
         kill();
@@ -964,6 +978,10 @@ public:
             server.reset();
         }
         return true;
+    }
+
+    void set_uid(uid_t uid_) {
+        uid = uid_;
     }
 
     bool set_passive(Server<void> &&s) {
