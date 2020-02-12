@@ -281,6 +281,33 @@ bool set_timeout_fd(int fd, int type, int seconds=60) {
     return setsockopt(fd, SOL_SOCKET, type, (char *)&timeout, sizeof(timeout)) != -1;
 }
 
+bool check_file_read_access(const std::string &filename) {
+    int fd = open(filename.c_str(), O_RDONLY);
+    if (fd != -1) {
+        close(fd);
+        return true;
+    }
+    return false;
+}
+
+bool check_file_write_access(const std::string &filename) {
+    int fd = open(filename.c_str(), O_CREAT, 0600);
+    if (fd != -1) {
+        close(fd);
+        return true;
+    }
+    return false;
+}
+
+bool check_folder_exists_access(const std::string &filename) {
+    int fd = open(filename.c_str(), O_RDONLY | O_DIRECTORY);
+    if (fd != -1) {
+        close(fd);
+        return true;
+    }
+    return false;
+}
+
 bool run_command(const std::string &cmd, std::ostream &out) {
     {
         FDOStream *s;
@@ -307,13 +334,6 @@ bool run_command(const std::string &cmd, std::ostream &out) {
 bool write_file(const std::string &filename, FDIStream &in) {
     if (!set_timeout_fd(in.get_fd(), SO_RCVTIMEO)) {
         return false;
-    }
-    {
-        int fd = open(filename.c_str(), O_CREAT, 0600);
-        if (fd == -1) {
-            return false;
-        }
-        close(fd);
     }
     std::ofstream file;
     file.open(filename, std::ios_base::out);
@@ -415,7 +435,7 @@ public:
 
     virtual bool operator()(F &f) = 0;
 
-    virtual bool process(int fd) {
+    virtual bool process(FDOStream &control, int fd) {
         throw std::runtime_error("Empty process");
     }
 };
@@ -640,20 +660,28 @@ public:
         if (!f.check_data_connect()) {
             return true;
         }
-        if (!f.data_connect.process(this)) {
-            SingleLine(f.out, 0) << ":(";
+        if (!check_folder_exists_access(path.empty() ? "." : path)) {
+            SingleLine(f.out, 450) << "No such folder.";
             return true;
         }
-        SingleLine(f.out, 0) << "Success";
+        if (!f.data_connect.process(f.out.get_fd(), this)) {
+            /// Kostyil
+            SingleLine(f.out, 150) << "No ways to leave.";
+            SingleLine(f.out, 451) << "No ways to live.";
+            return true;
+        }
+        SingleLine(f.out, 150) << "Successfully started.";
         return true;
     }
 
-    bool process(int fd) override {
+    bool process(FDOStream &control, int fd) override {
         FDOStream out(fd);
-        if (path.empty()) {
-            return run_command("ls -la ", out);
+        std::string cmd = "ls -la " + path;
+        auto result = run_command(cmd, out);
+        if (result) {
+            SingleLine(control, 226) << "Success";
         }
-        return run_command("ls -la " + path, out);
+        return result;
     }
 
     std::string path;
@@ -667,25 +695,31 @@ public:
         if (!f.check_data_connect()) {
             return true;
         }
-        if (!f.data_connect.is_ready()) {
-            SingleLine(f.out, 0) << "Open connection firstly by PASV or PORT.";
-            return true;
-        }
         if (path.empty()) {
-            SingleLine(f.out, 0) << "Path should be specified";
+            SingleLine(f.out, 501) << "Path should be specified.";
             return true;
         }
-        if (!f.data_connect.process(this)) {
-            SingleLine(f.out, 0) << ":(";
+        if (!check_file_read_access(path)) {
+            SingleLine(f.out, 550) << "No access.";
             return true;
         }
-        SingleLine(f.out, 0) << "Success";
+        if (!f.data_connect.process(f.out.get_fd(), this)) {
+            /// Kostyil
+            SingleLine(f.out, 150) << "No ways to leave.";
+            SingleLine(f.out, 451) << "No ways to live.";
+            return true;
+        }
+        SingleLine(f.out, 150) << "Successfully started.";
         return true;
     }
 
-    bool process(int fd) override {
+    bool process(FDOStream &control, int fd) override {
         FDOStream out(fd);
-        return run_command("cat " + path, out);
+        auto result = run_command("cat " + path, out);
+        if (result) {
+            SingleLine(control, 226) << "Success.";
+        }
+        return result;
     }
 
     std::string path;
@@ -700,20 +734,30 @@ public:
             return true;
         }
         if (path.empty()) {
-            SingleLine(f.out, 0) << "Path should be specified";
+            SingleLine(f.out, 501) << "Path should be specified.";
             return true;
         }
-        if (!f.data_connect.process(this)) {
-            SingleLine(f.out, 0) << ":(";
+        if (!check_file_write_access(path)) {
+            SingleLine(f.out, 550) << "No access.";
             return true;
         }
-        SingleLine(f.out, 0) << "Success";
+        if (!f.data_connect.process(f.out.get_fd(), this)) {
+            /// Kostyil
+            SingleLine(f.out, 150) << "No ways to leave.";
+            SingleLine(f.out, 451) << "No ways to live.";
+            return true;
+        }
+        SingleLine(f.out, 150) << "Successfully started.";
         return true;
     }
 
-    bool process(int fd) override {
+    bool process(FDOStream &control, int fd) override {
         FDIStream in(fd);
-        return write_file(path, in);
+        auto result = write_file(path, in);
+        if (result) {
+            SingleLine(control, 226) << "Success.";
+        }
+        return result;
     }
 
     std::string path;
@@ -723,21 +767,27 @@ template <class F>
 class Sleep : public Operation<F> {
 public:
     bool operator()(F &f) override {
-        auto path = read_till_end(f.in);
+        read_till_end(f.in);
         if (!f.check_data_connect()) {
             return true;
         }
-        if (!f.data_connect.process(this)) {
-            SingleLine(f.out, 0) << ":(";
+        if (!f.data_connect.process(f.out.get_fd(), this)) {
+            /// Kostyil
+            SingleLine(f.out, 150) << "No ways to leave.";
+            SingleLine(f.out, 451) << "No ways to live.";
             return true;
         }
-        SingleLine(f.out, 0) << "Success";
+        SingleLine(f.out, 150) << "Successfully started.";
         return true;
     }
 
-    bool process(int fd) override {
+    bool process(FDOStream &control, int fd) override {
         FDOStream out(fd);
-        return run_command("sleep 20", out);
+        auto result = run_command("sleep 20", out);
+        if (result) {
+            SingleLine(control, 226) << "Success.";
+        }
+        return result;
     }
 };
 
@@ -880,7 +930,7 @@ class DataConnect {
 
     pid_t child_ = -1;
 
-    int open_connection() {
+    int open_data_connection() {
         if (state == State::kReadyOut) {
             int sock;
             if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
@@ -948,7 +998,7 @@ public:
         return false;
     }
 
-    bool process(Operation<F>* op) {
+    bool process(int fd_control, Operation<F>* op) {
         if (!is_ready()) {
             throw std::runtime_error("Not valid process");
         }
@@ -962,13 +1012,14 @@ public:
                     exit(5);
                 }
             }
-            int user = open_connection();
+            int user = open_data_connection();
+            FDOStream control(fd_control);
             if (user == -1) {
-                std::cerr << "Can not create user connection" << std::endl;
+                SingleLine(control, 425) << "Can not open data connection";
                 exit(6);
             }
-            if (!op->process(user)) {
-                std::cerr << "Internal error" << std::endl;
+            if (!op->process(control, user)) {
+                SingleLine(control, 451) << "Internal Error";
                 exit(1);
             }
             exit(0);
