@@ -1,24 +1,11 @@
-#include <iostream>
-#include <array>
-#include <map>
+#include <algorithm>
 #include <memory>
 #include <optional>
-#include <sstream>
-#include <fstream>
 
-#include <unistd.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <wait.h>
+#include <sys/stat.h>
 #include <security/pam_appl.h>
 #include <security/pam_misc.h>
-
-
-#include <algorithm>
-#include <sys/stat.h>
+#include <wait.h>
 
 #include "server.hpp"
 #include "tools.hpp"
@@ -208,7 +195,7 @@ public:
             SingleLine(f.out, 200) << "OK.";
             return true;
         }
-        if (type == "R") {  /// Record. @TODO
+        if (type == "R") {  /// Record
             SingleLine(f.out, 504) << "Not OK.";
             return true;
         }

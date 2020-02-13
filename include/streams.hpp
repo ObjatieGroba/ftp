@@ -3,6 +3,7 @@
 
 #include <iostream>
 #include <fstream>
+#include <sstream>
 
 #include "blockstream.hpp"
 #include "compressedstream.hpp"

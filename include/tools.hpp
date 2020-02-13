@@ -2,6 +2,7 @@
 #define FTP_TOOLS_HPP
 
 #include <array>
+#include <map>
 
 #include <unistd.h>
 #include <fcntl.h>
