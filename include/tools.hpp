@@ -203,6 +203,10 @@ std::tuple<std::map<std::string, std::string>, bool> read_db(const std::string &
     std::map<std::string, std::string> passes;
     std::ifstream file;
     file.open(filename, std::ios_base::in);
+    if (!file) {
+        std::cerr << "No file with passes\n";
+        exit(1);
+    }
     std::string line;
     std::getline(file, line);
     while (!file.eof()) {
