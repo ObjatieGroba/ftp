@@ -7,4 +7,4 @@ RUN cd /build && cmake . -DCMAKE_BUILD_TYPE=Release && make -j 4 ftp
 RUN cp /build/ftp /ftp
 RUN rm -r /build
 
-ENTRYPOINT /build/ftp
+ENTRYPOINT ./ftp
