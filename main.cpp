@@ -1036,7 +1036,7 @@ int main(int args, char **argv) {
     FTP::Settings settings{};
 
     settings.default_dir = parse_env_req("HW1_DIRECTORY");
-    auto user_passes = parse_env_req("HW1_USERS");
+    auto user_passes = parse_env("HW1_USERS");
     settings.bind_host = parse_env_req("HW1_HOST");
     auto bind_port = parse_env_req("HW1_PORT");
     auto is_disabled = parse_env("HW1_AUTH_DISABLED");

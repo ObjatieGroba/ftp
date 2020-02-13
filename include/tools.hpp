@@ -192,7 +192,7 @@ static std::string read_till_end(FDIStream &in) {
     return res;
 }
 
-std::tuple<std::map<std::string, std::string>, bool> read_db(const std::string &filename,
+std::tuple<std::map<std::string, std::string>, bool> read_db(const std::optional<std::string> &filename2,
                                                              const std::optional<std::string> &is_disabled) {
     bool need_login = !is_disabled || is_disabled.value() != "1";
 
@@ -200,6 +200,12 @@ std::tuple<std::map<std::string, std::string>, bool> read_db(const std::string &
         return {{}, need_login};
     }
 
+    if (!filename2) {
+        std::cerr << "No file with passes\n";
+        exit(1);
+    }
+
+    const auto& filename = filename2.value();
     std::map<std::string, std::string> passes;
     std::ifstream file;
     file.open(filename, std::ios_base::in);
