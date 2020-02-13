@@ -12,7 +12,8 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <netinet/in.h>
-#include <csignal>
+#include <arpa/inet.h>
+#include <sys/stat.h>
 #include <wait.h>
 #include <security/pam_appl.h>
 #include <security/pam_misc.h>
@@ -23,7 +24,8 @@ constexpr unsigned BUF_SIZE = 1024;
 template <class Handler>
 class Server {
 public:
-    Server(uint16_t port, int queue_size = 5) : sock_(socket(AF_INET, SOCK_STREAM, 0)) {
+    Server(const std::string &host, uint16_t port, int queue_size = 5)
+        : sock_(socket(AF_INET, SOCK_STREAM, 0)) {
         if (sock_ == -1) {
             throw std::runtime_error("Can not create socket");
         }
@@ -34,7 +36,7 @@ public:
         }
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = INADDR_ANY;
+        addr.sin_addr.s_addr = inet_addr(host.c_str());
         addr.sin_port = htons(port);
         if (bind(sock_, (sockaddr*)&addr, sizeof(addr)) == -1) {
             close(sock_);
@@ -60,11 +62,12 @@ public:
         close(sock_);
     }
 
-    void run() {
+    template <class Settings>
+    void run(const Settings &settings) {
         int user_sock;
         while ((user_sock = accept(sock_, nullptr, nullptr)) != -1) {
             try {
-                Handler(user_sock).run();
+                Handler(user_sock, settings).run();
             } catch (const std::exception& e) {
                 std::cerr << e.what() << '\n';
             }
@@ -290,8 +293,8 @@ bool check_file_read_access(const std::string &filename) {
     return false;
 }
 
-bool check_file_write_access(const std::string &filename) {
-    int fd = open(filename.c_str(), O_CREAT, 0600);
+bool check_file_write_access(const std::string &filename, int mode=O_CREAT) {
+    int fd = open(filename.c_str(), mode, 0600);
     if (fd != -1) {
         close(fd);
         return true;
@@ -331,12 +334,16 @@ bool run_command(const std::string &cmd, std::ostream &out) {
     return false;
 }
 
-bool write_file(const std::string &filename, FDIStream &in) {
+bool write_file(const std::string &filename, int mode, FDIStream &in) {
     if (!set_timeout_fd(in.get_fd(), SO_RCVTIMEO)) {
         return false;
     }
     std::ofstream file;
-    file.open(filename, std::ios_base::out);
+    if (mode & O_APPEND) {
+        file.open(filename, std::fstream::out | std::fstream::app);
+    } else {
+        file.open(filename, std::fstream::out);
+    }
     if (!file) {
         return false;
     }
@@ -539,6 +546,215 @@ public:
 };
 
 template <class F>
+class Type : public Operation<F> {
+public:
+    bool operator()(F &f) override {
+        auto type = read_till_end(f.in);
+        if (type == "AN") {
+            SingleLine(f.out, 200) << "OK.";
+            return true;
+        }
+        if (type == "L 8") {
+            SingleLine(f.out, 200) << "OK.";
+            return true;
+        }
+        SingleLine(f.out, 504) << "Only 8bit ASCII non-print supported.";
+        return true;
+    }
+};
+
+template <class F>
+class Mode : public Operation<F> {
+public:
+    bool operator()(F &f) override {
+        auto type = read_till_end(f.in);
+        if (type == "S") {
+            SingleLine(f.out, 200) << "OK.";
+            return true;
+        }
+        if (type == "B") {
+            SingleLine(f.out, 504) << "Not OK.";
+            return true;
+        }
+        if (type == "C") {
+            SingleLine(f.out, 504) << "Not OK.";
+            return true;
+        }
+        SingleLine(f.out, 500) << "Unknown mode.";
+        return true;
+    }
+};
+
+template <class F>
+class Stru : public Operation<F> {
+public:
+    bool operator()(F &f) override {
+        auto type = read_till_end(f.in);
+        if (type == "F") {  /// File
+            SingleLine(f.out, 200) << "OK.";
+            return true;
+        }
+        if (type == "R") {  /// Record. @TODO
+            SingleLine(f.out, 504) << "Not OK.";
+            return true;
+        }
+        if (type == "P") {  /// Page
+            SingleLine(f.out, 504) << "Not OK.";
+            return true;
+        }
+        SingleLine(f.out, 500) << "Unknown structure.";
+        return true;
+    }
+};
+
+template <class F>
+class CDUp : public Operation<F> {
+public:
+    bool operator()(F &f) override {
+        if (!read_till_end(f.in).empty()) {
+            SingleLine(f.out, 501) << "Arguments not expected.";
+            return true;
+        }
+        chdir("..");
+        SingleLine(f.out, 200) << "OK.";
+        return true;
+    }
+};
+
+template <class F>
+class CWD : public Operation<F> {
+public:
+    bool operator()(F &f) override {
+        path = read_till_end(f.in);
+        if (path.empty()) {
+            SingleLine(f.out, 501) << "Path should be specified.";
+            return true;
+        }
+        int status;
+        if (!f.run_without_data_connect(this, &status)) {
+            SingleLine(f.out, 421) << "Internal error";
+            return true;
+        }
+        if (status != 0) {
+            SingleLine(f.out, 550) << "Incorrect path.";
+            return true;
+        }
+        if (chdir(path.c_str()) != 0) {
+            SingleLine(f.out, 550) << "Incorrect path.";
+            return true;
+        }
+        SingleLine(f.out, 250) << "OK.";
+        return true;
+    }
+
+    bool process(FDOStream&, int) override {
+        /// Kostyil'. Checking that has access by uid
+        if (chdir(path.c_str()) != 0) {
+            exit(1);
+        }
+        exit(0);
+    }
+
+    std::string path;
+};
+
+template <class F>
+class RMD : public Operation<F> {
+public:
+    bool operator()(F &f) override {
+        path = read_till_end(f.in);
+        if (path.empty()) {
+            SingleLine(f.out, 501) << "Path should be specified.";
+            return true;
+        }
+        if (!f.run_without_data_connect(this)) {
+            SingleLine(f.out, 421) << "Internal error";
+            return true;
+        }
+        return true;
+    }
+
+    bool process(FDOStream &out, int) override {
+        if (!check_folder_exists_access(path)) {
+            SingleLine(out, 550) << "Incorrect path.";
+            return true;
+        }
+        std::ostringstream ss{};
+        run_command("rm -r " + path, ss);
+        SingleLine(out, 250) << "OK.";
+        return true;
+    }
+
+    std::string path;
+};
+
+template <class F>
+class MKD : public Operation<F> {
+public:
+    bool operator()(F &f) override {
+        path = read_till_end(f.in);
+        if (path.empty()) {
+            SingleLine(f.out, 501) << "Path should be specified.";
+            return true;
+        }
+        if (!f.run_without_data_connect(this)) {
+            SingleLine(f.out, 421) << "Internal error";
+            return true;
+        }
+        return true;
+    }
+
+    bool process(FDOStream &out, int) override {
+        if (check_folder_exists_access(path)) {
+            SingleLine(out, 550) << "Path already exists.";
+            return true;
+        }
+        if (mkdir(path.c_str(), 0600) != 0) {
+            SingleLine(out, 550) << "No access.";
+            return true;
+        }
+        SingleLine(out, 257) << "OK.";
+        return true;
+    }
+
+    std::string path;
+};
+
+template <class F>
+class Dele : public Operation<F> {
+public:
+    bool operator()(F &f) override {
+        path = read_till_end(f.in);
+        if (path.empty()) {
+            SingleLine(f.out, 501) << "Path should be specified.";
+            return true;
+        }
+        if (!f.run_without_data_connect(this)) {
+            SingleLine(f.out, 421) << "Internal error";
+            return true;
+        }
+        return true;
+    }
+
+    bool process(FDOStream &out, int) override {
+        if (!check_file_read_access(path)) {
+            SingleLine(out, 550) << "Incorrect path.";
+            return true;
+        }
+        if (!check_file_write_access(path)) {
+            SingleLine(out, 550) << "Incorrect path.";
+            return true;
+        }
+        std::ostringstream ss{};
+        run_command("rm " + path, ss);
+        SingleLine(out, 250) << "OK.";
+        return true;
+    }
+
+    std::string path;
+};
+
+template <class F>
 class Port : public Operation<F> {
 public:
     bool operator()(F &f) override {
@@ -610,9 +826,11 @@ public:
         }
         if (!read_till_end(f.in).empty()) {
             SingleLine(f.out, 501) << "Bad format. Extra data found.";
+            return true;
         }
         unsigned ip = (h1 << 24u) + (h2 << 16u) + (h3 << 8u) + h4;
         unsigned port = (p1 << 8u) + p2;
+        std::cerr << "Conn to " << ip << ' ' << port << std::endl;
         if (!f.data_connect.set_active(ip, port)) {
             SingleLine(f.out, 500) << "Internal error.";
             return true;
@@ -634,9 +852,9 @@ public:
             return true;
         }
         unsigned port = 10000;// + rand() % 10;
-        std::cout << port << std::endl;
+        std::cerr << "Listen on " << port << std::endl;
         try {
-            Server<void> server(port, 1);
+            Server<void> server(f.settings.bind_host, port, 1);
             if (!f.data_connect.set_passive(std::move(server))) {
                 SingleLine(f.out, 500) << "Internal error.";
                 return true;
@@ -655,6 +873,10 @@ public:
 template <class F>
 class List : public Operation<F> {
 public:
+    List(std::string command_="ls -l") : command(std::move(command_)) {
+        command.push_back(' ');
+    }
+
     bool operator()(F &f) override {
         path = read_till_end(f.in);
         if (!f.check_data_connect()) {
@@ -676,7 +898,7 @@ public:
 
     bool process(FDOStream &control, int fd) override {
         FDOStream out(fd);
-        std::string cmd = "ls -la " + path;
+        std::string cmd = command + path;
         auto result = run_command(cmd, out);
         if (result) {
             SingleLine(control, 226) << "Success";
@@ -685,6 +907,7 @@ public:
     }
 
     std::string path;
+    std::string command;
 };
 
 template <class F>
@@ -726,8 +949,10 @@ public:
 };
 
 template <class F>
-class Stor : public Operation<F> {
+class iStor : public Operation<F> {
 public:
+    iStor(int mode_=O_CREAT) : mode(mode_) { }
+
     bool operator()(F &f) override {
         path = read_till_end(f.in);
         if (!f.check_data_connect()) {
@@ -737,7 +962,7 @@ public:
             SingleLine(f.out, 501) << "Path should be specified.";
             return true;
         }
-        if (!check_file_write_access(path)) {
+        if (!check_file_write_access(path, mode)) {
             SingleLine(f.out, 550) << "No access.";
             return true;
         }
@@ -753,7 +978,7 @@ public:
 
     bool process(FDOStream &control, int fd) override {
         FDIStream in(fd);
-        auto result = write_file(path, in);
+        auto result = write_file(path, mode, in);
         if (result) {
             SingleLine(control, 226) << "Success.";
         }
@@ -761,6 +986,7 @@ public:
     }
 
     std::string path;
+    int mode;
 };
 
 template <class F>
@@ -791,10 +1017,15 @@ public:
     }
 };
 
-std::map<std::string, std::string> passes;
+std::tuple<std::map<std::string, std::string>, bool> read_db(const std::string &filename,
+                                                             const std::optional<std::string> &is_disabled) {
+    bool need_login = !is_disabled || is_disabled.value() != "1";
 
-void read_db(const std::string &filename) {
-    passes.clear();
+    if (!need_login) {
+        return {{}, need_login};
+    }
+
+    std::map<std::string, std::string> passes;
     std::ifstream file;
     file.open(filename, std::ios_base::in);
     std::string line;
@@ -810,6 +1041,7 @@ void read_db(const std::string &filename) {
         }
         passes[line.substr(0, pos)] = line.substr(pos + 1);
     }
+    return std::make_tuple(std::move(passes), need_login);
 }
 
 // Global? Yes, it is.
@@ -823,23 +1055,27 @@ int function_conversation(int num_msg, const struct pam_message **msg,
 
 template <class F>
 class Pass : public Operation<F> {
-    bool check_password(const std::string &user, const std::string &pass) const {
+    bool check_password(const std::string &user, const std::string &pass, F &f) const {
+        f.data_connect.set_uid(-1);
+        f.uid = -1;
         if (user == "anonymous") {
             return true;
         }
-        auto it = passes.find(user);
-        if (it == passes.end()) {
+        auto it = f.settings.passes.find(user);
+        if (it == f.settings.passes.end()) {
             return false;
         }
         return it->second == pass;
     }
 
     bool check_password_pam(const std::string &user_id, std::string &pass, F &f) const {
+        f.data_connect.set_uid(-1);
+        f.uid = -1;
         if (user_id == "anonymous") {
             return true;
         }
-        auto it = passes.find(user_id);
-        if (it == passes.end()) {
+        auto it = f.settings.passes.find(user_id);
+        if (it == f.settings.passes.end()) {
             return false;
         }
         if (!std::all_of(user_id.begin(), user_id.end(), [](char c){ return isdigit(c); })) {
@@ -871,6 +1107,7 @@ class Pass : public Operation<F> {
             // Update user info
             f.username = user;
             f.data_connect.set_uid(uid);
+            f.uid = uid;
         }
         return retval == PAM_SUCCESS;
     }
@@ -880,16 +1117,7 @@ public:
         auto password = read_till_end(f.in);
         if (check_password_pam(f.username, password, f)) {
             f.functions.erase("PASS");
-            f.functions["PORT"] = std::make_unique<Port<F>>();
-            f.functions["PASV"] = std::make_unique<Pasv<F>>();
-            f.functions["ABOR"] = std::make_unique<Abort<F>>();
-
-            f.functions["NOOP"] = std::make_unique<Noop<F>>();
-            f.functions["LIST"] = std::make_unique<List<F>>();
-            f.functions["RETR"] = std::make_unique<Retr<F>>();
-            f.functions["STOR"] = std::make_unique<Stor<F>>();
-            f.functions["SLEEP"] = std::make_unique<Sleep<F>>();
-            f.default_function = std::make_unique<NoFunc<F>>();
+            f.add_user_functions();
             SingleLine(f.out, 230) << "Success.";
             return true;
         }
@@ -970,9 +1198,8 @@ public:
             return;
         }
         int st;
-        std::cout << "Kill" << std::endl;
-        std::cout << ::kill(child_, SIGABRT) << '-' << child_ << std::endl;
-        std::cout << waitpid(child_, &st, 0) << '-' << st << std::endl;
+        ::kill(child_, SIGABRT);
+        waitpid(child_, &st, 0);
         state = State::kNone;
         child_ = -1;
     }
@@ -989,8 +1216,7 @@ public:
             return false;
         }
         int status;
-        std::cout << waitpid(child_, &status, WNOHANG) << ' ' << status << std::endl;
-        std::cout << ::kill(child_, 0) << ' ' << child_ << std::endl;
+        waitpid(child_, &status, WNOHANG);
         if (::kill(child_, 0) != 0) {
             state = State::kNone;
             return true;
@@ -1057,7 +1283,14 @@ public:
 
 class FTP {
 public:
-    explicit FTP(int fd) : in(fd), out(fd) {
+    struct Settings {
+        std::string default_dir;
+        std::string bind_host;
+        std::map<std::string, std::string> passes;
+        bool need_login;
+    };
+
+    explicit FTP(int fd, const Settings &settings_) : in(fd), out(fd), settings(settings_) {
         in.dismiss();
         struct timeval timeout{30, 0};
         if (!set_timeout_fd(fd, SO_RCVTIMEO)) {
@@ -1068,10 +1301,41 @@ public:
             close(fd);
             throw std::runtime_error("Can not set snd timeout");
         }
-        functions["USER"] = std::make_unique<User<FTP>>();
         functions["HELP"] = std::make_unique<Help<FTP>>();
         functions["QUIT"] = std::make_unique<Quit<FTP>>();
-        default_function = std::make_unique<LoginNeed<FTP>>();
+        if (settings.need_login) {
+            functions["USER"] = std::make_unique<User<FTP>>();
+            default_function = std::make_unique<LoginNeed<FTP>>();
+        } else {
+            add_user_functions();
+        }
+    }
+
+    void add_user_functions() {
+        functions["PORT"] = std::make_unique<Port<FTP>>();
+        functions["PASV"] = std::make_unique<Pasv<FTP>>();
+        functions["ABOR"] = std::make_unique<Abort<FTP>>();
+
+        functions["TYPE"] = std::make_unique<Type<FTP>>();
+        functions["MODE"] = std::make_unique<Mode<FTP>>();
+        functions["STRU"] = std::make_unique<Stru<FTP>>();
+
+        functions["NOOP"] = std::make_unique<Noop<FTP>>();
+        functions["LIST"] = std::make_unique<List<FTP>>();
+        functions["RETR"] = std::make_unique<Retr<FTP>>();
+        functions["STOR"] = std::make_unique<iStor<FTP>>();
+
+        functions["CDUP"] = std::make_unique<CDUp<FTP>>();
+        functions["CWD"] = std::make_unique<CWD<FTP>>();
+        functions["APPE"] = std::make_unique<iStor<FTP>>(O_CREAT | O_APPEND);
+        functions["DELE"] = std::make_unique<Dele<FTP>>();
+        functions["RMD"] = std::make_unique<RMD<FTP>>();
+        functions["MKD"] = std::make_unique<MKD<FTP>>();
+        functions["NLST"] = std::make_unique<List<FTP>>("ls -1");
+
+        functions["NOOP"] = std::make_unique<Noop<FTP>>();
+        functions["SLEEP"] = std::make_unique<Sleep<FTP>>();
+        default_function = std::make_unique<NoFunc<FTP>>();
     }
 
     bool check_data_connect() {
@@ -1086,25 +1350,37 @@ public:
         return false;
     }
 
-//
-//    bool type() {
-//        char t;
-//        in >> t;
-//        switch (t) {
-//            case 'A':
-//            case 'I':
-//                out << "200 Type changed to " << t << "\r\n";
-//            default:
-//                out << "000 Error: Unsupported type\r\n";
-//                return true;
-//        }
-//        return false;
-//    }
+    bool run_without_data_connect(Operation<FTP> *op, int *status=nullptr) {
+        auto pid = fork();
+        if (pid < 0) {
+            return false;
+        }
+        if (pid == 0) {
+            if (uid != -1) {
+                if (setuid(uid) != 0) {
+                    SingleLine(out, 421) << "Internal Error";
+                    exit(5);
+                }
+            }
+            if (!op->process(out, -1)) {
+                SingleLine(out, 421) << "Internal Error";
+                exit(1);
+            }
+            exit(0);
+        }
+        int st;
+        waitpid(pid, status ? status : &st, 0);
+        return true;
+    }
 
     std::map<std::string, std::unique_ptr<Operation<FTP>>> functions;
     std::unique_ptr<Operation<FTP>> default_function;
 
     void run() {
+        if (chdir(settings.default_dir.c_str()) != 0) {
+            std::cerr << "Directory set initial failed\n";
+            exit(1);
+        }
         SingleLine(out, 220) << "Igor Mineev Server Ready.";
         std::string command;
         while (in >> command) {
@@ -1132,14 +1408,49 @@ public:
     FDOStream out;
     std::string username;
     DataConnect<FTP> data_connect;
+    uid_t uid = -1;
+
+    const Settings &settings;
 };
 
 void empty(int signum) { }
 
+std::optional<std::string> parse_env(const std::string &name) {
+    char * str = getenv(name.c_str());
+    if (str == nullptr) {
+        return {};
+    }
+    return std::string(str);
+}
 
-int main() {
+std::string parse_env_req(const std::string &name) {
+    char * str = getenv(name.c_str());
+    if (str == nullptr) {
+        std::cerr << "Specify " << name << std::endl;
+        exit(1);
+    }
+    return str;
+}
+
+int main(int args, char **argv) {
     signal(SIGPIPE, empty);
 
-    read_db("../passes");
-    Server<FTP>(8080).run();
+    FTP::Settings settings{};
+
+    settings.default_dir = parse_env_req("HW1_DIRECTORY");
+    auto user_passes = parse_env_req("HW1_USERS");
+    settings.bind_host = parse_env_req("HW1_HOST");
+    auto bind_port = parse_env_req("HW1_PORT");
+    auto is_disabled = parse_env("HW1_AUTH_DISABLED");
+
+    auto [passes, need_login] = read_db(user_passes, is_disabled);
+    settings.passes = std::move(passes);
+    settings.need_login = need_login;
+
+    if (!check_folder_exists_access(settings.default_dir)) {
+        std::cerr << "No such dir " << settings.default_dir << std::endl;
+        return 1;
+    }
+
+    Server<FTP>(settings.bind_host, strtol(bind_port.c_str(), nullptr, 10)).run(settings);
 }
