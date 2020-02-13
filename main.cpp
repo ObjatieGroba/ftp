@@ -1,6 +1,5 @@
 #include <iostream>
 #include <array>
-#include <algorithm>
 #include <map>
 #include <memory>
 #include <optional>
@@ -13,423 +12,16 @@
 #include <sys/un.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <sys/stat.h>
 #include <wait.h>
 #include <security/pam_appl.h>
 #include <security/pam_misc.h>
-#include <fcntl.h>
 
-constexpr unsigned BUF_SIZE = 1024;
 
-template <class Handler>
-class Server {
-public:
-    Server(const std::string &host, uint16_t port, int queue_size = 5)
-        : sock_(socket(AF_INET, SOCK_STREAM, 0)) {
-        if (sock_ == -1) {
-            throw std::runtime_error("Can not create socket");
-        }
-        int enable = 1;
-        if (setsockopt(sock_, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable)) == -1) {
-            close(sock_);
-            throw std::runtime_error("Can not set reusable");
-        }
-        sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = inet_addr(host.c_str());
-        addr.sin_port = htons(port);
-        if (bind(sock_, (sockaddr*)&addr, sizeof(addr)) == -1) {
-            close(sock_);
-            throw std::runtime_error("Can not bind");
-        }
-        if (listen(sock_, queue_size) == -1) {
-            close(sock_);
-            throw std::runtime_error("Can not listen");
-        }
-    }
+#include <algorithm>
+#include <sys/stat.h>
 
-    Server(Server &&other) noexcept : sock_(other.sock_) {
-        other.sock_ = -1;
-    }
-
-    Server& operator=(Server &&other) noexcept {
-        sock_ = other.sock_;
-        other.sock_ = -1;
-        return *this;
-    }
-
-    ~Server() {
-        close(sock_);
-    }
-
-    template <class Settings>
-    void run(const Settings &settings) {
-        int user_sock;
-        while ((user_sock = accept(sock_, nullptr, nullptr)) != -1) {
-            try {
-                Handler(user_sock, settings).run();
-            } catch (const std::exception& e) {
-                std::cerr << e.what() << '\n';
-            }
-        }
-    }
-
-    int accept_one() {
-        struct timeval tv{};
-        fd_set rfds;
-        FD_ZERO(&rfds);
-        FD_SET(sock_, &rfds);
-        tv.tv_sec = 30;
-        tv.tv_usec = 0;
-
-        int res = select(sock_ + 1, &rfds, nullptr, nullptr, &tv);
-        if (res > 0) {
-            return accept(sock_, nullptr, nullptr);
-        }
-        return -1;
-    }
-
-private:
-    int sock_;
-};
-
-class FDBuf : public std::streambuf {
-public:
-    explicit FDBuf (int fd) : fd_(fd) { }
-
-    ~FDBuf() final {
-        if (need_close) {
-            close(fd_);
-        }
-    }
-
-    int dismiss() {
-        need_close = false;
-        return fd_;
-    }
-
-    int get_fd() const {
-        return fd_;
-    }
-
-protected:
-    int overflow (int c) final {
-        throw std::runtime_error("Not implemented");
-    }
-
-    int sync() final {
-        if (out_size_== 0) {
-            return 0;
-        }
-        int res;
-        do {
-            errno = 0;
-            res = send(fd_, out_buf_.data(), out_size_, 0);
-        } while (res == -1 && errno == EINTR);
-        if (res != out_size_) {
-            std::cerr << res << ' ' << errno << std::endl;
-            throw std::runtime_error("Can not write to fd");
-        }
-        out_size_ = 0;
-        return 0;
-    }
-
-    std::streamsize xsputn(const char* s, std::streamsize num_) final {
-        unsigned long num = num_;
-        while (num > 0) {
-            auto can_write = std::min(out_buf_.size() - out_size_, num);
-            if (can_write > 0) {
-                memcpy(out_buf_.data() + out_size_, s, can_write);
-                s += can_write;
-                num -= can_write;
-                out_size_ += can_write;
-            }
-            if (out_size_ == out_buf_.size()) {
-                int res;
-                do {
-                    errno = 0;
-                    res = send(fd_, out_buf_.data(), out_size_, 0);
-                } while (res == -1 && errno == EINTR);
-                if (res != out_size_) {
-                    std::cerr << res << ' ' << errno << std::endl;
-                    throw std::runtime_error("Can not write to fd");
-                }
-                out_size_ = 0;
-            }
-        }
-        return num_;
-    }
-
-    std::streamsize xsgetn(char* s, std::streamsize num_) final {
-        std::cerr << "getn" << num_ << "\n";
-        int num = num_;
-        while (num > 0) {
-            if (in_cur_ < in_size_) {
-                auto can_read = std::min(in_size_ - in_cur_, num);
-                if (can_read > 0) {
-                    memcpy(s, in_buf_.data() + in_cur_, can_read);
-                    s += can_read;
-                    num -= can_read;
-                    in_cur_ += can_read;
-                }
-            } else {
-                do {
-                    errno = 0;
-                    in_size_ = recv(fd_, in_buf_.data(), in_buf_.size(), 0);
-                } while (in_size_ == -1 && errno == EINTR);
-                in_cur_ = 0;
-                if (in_size_ == -1) {
-                    std::cerr << errno << std::endl;
-                    throw std::runtime_error("Can not read from fd");
-                }
-                if (in_size_ == 0) {
-                    /// EOF
-                    return num_;
-                }
-            }
-        }
-        return num_;
-    }
-
-    int underflow() final {
-        if (in_cur_ != in_size_) {
-            return in_buf_[in_cur_];
-        }
-        do {
-            errno = 0;
-            in_size_ = recv(fd_, in_buf_.data(), in_buf_.size(), 0);
-        } while (in_size_ == -1 && errno == EINTR);
-        in_cur_ = 0;
-        if (in_size_ == -1) {
-            std::cerr << errno << std::endl;
-            throw std::runtime_error("Can not read from fd");
-        }
-        if (in_size_ == 0) {
-            return EOF;
-        }
-        return in_buf_[in_cur_];
-    }
-
-    int uflow() final {
-        if (in_cur_ != in_size_) {
-            return in_buf_[in_cur_++];
-        }
-        do {
-            errno = 0;
-            in_size_ = recv(fd_, in_buf_.data(), in_buf_.size(), 0);
-        } while (in_size_ == -1 && errno == EINTR);
-        in_cur_ = 0;
-        if (in_size_ == -1) {
-            std::cerr << errno << std::endl;
-            throw std::runtime_error("Can not read from fd");
-        }
-        if (in_size_ == 0) {
-            return EOF;
-        }
-        return in_buf_[in_cur_++];
-    }
-
-    std::streamsize showmanyc() final {
-        throw std::runtime_error("Not implemented");
-    }
-
-    int pbackfail(int c) final {
-        throw std::runtime_error("Not implemented");
-    }
-
-private:
-    int fd_;
-    bool need_close = true;
-    int in_cur_ = 0, in_size_ = 0, out_size_ = 0;
-    std::array<char, BUF_SIZE> in_buf_{};
-    std::array<char, BUF_SIZE> out_buf_{};
-};
-
-class FDOStream : public std::ostream {
-protected:
-    FDBuf buf_;
-public:
-    explicit FDOStream (int fd) : std::ostream(nullptr), buf_(fd) {
-        rdbuf(&buf_);
-    }
-
-    int dismiss() {
-        return buf_.dismiss();
-    }
-
-    int get_fd() const {
-        return buf_.get_fd();
-    }
-};
-
-class FDIStream : public std::istream {
-protected:
-    FDBuf buf_;
-public:
-    explicit FDIStream (int fd) : std::istream(nullptr), buf_(fd) {
-        rdbuf(&buf_);
-    }
-
-    int dismiss() {
-        return buf_.dismiss();
-    }
-
-    int get_fd() const {
-        return buf_.get_fd();
-    }
-};
-
-bool set_timeout_fd(int fd, int type, int seconds=60) {
-    struct timeval timeout{seconds, 0};
-    return setsockopt(fd, SOL_SOCKET, type, (char *)&timeout, sizeof(timeout)) != -1;
-}
-
-bool check_file_read_access(const std::string &filename) {
-    int fd = open(filename.c_str(), O_RDONLY);
-    if (fd != -1) {
-        close(fd);
-        return true;
-    }
-    return false;
-}
-
-bool check_file_write_access(const std::string &filename, int mode=O_CREAT) {
-    int fd = open(filename.c_str(), mode, 0600);
-    if (fd != -1) {
-        close(fd);
-        return true;
-    }
-    return false;
-}
-
-bool check_folder_exists_access(const std::string &filename) {
-    int fd = open(filename.c_str(), O_RDONLY | O_DIRECTORY);
-    if (fd != -1) {
-        close(fd);
-        return true;
-    }
-    return false;
-}
-
-bool run_command(const std::string &cmd, std::ostream &out) {
-    {
-        FDOStream *s;
-        if ((s = dynamic_cast<FDOStream *>(&out)) != nullptr) {
-            if (!set_timeout_fd(s->get_fd(), SO_SNDTIMEO)) {
-                return false;
-            }
-        }
-    }
-    std::array<char, 4096> buf{};
-    FILE *file;
-    if ((file = popen(cmd.c_str(), "r")) != nullptr) {
-        size_t read;
-        while ((read = fread(buf.data(), sizeof(char), sizeof(buf) / sizeof(char), file)) != 0) {
-            out << std::string_view(buf.data(), read);
-        }
-        out.flush();
-        pclose(file);
-        return true;
-    }
-    return false;
-}
-
-bool write_file(const std::string &filename, int mode, FDIStream &in) {
-    if (!set_timeout_fd(in.get_fd(), SO_RCVTIMEO)) {
-        return false;
-    }
-    std::ofstream file;
-    if (mode & O_APPEND) {
-        file.open(filename, std::fstream::out | std::fstream::app);
-    } else {
-        file.open(filename, std::fstream::out);
-    }
-    if (!file) {
-        return false;
-    }
-    std::copy(std::istreambuf_iterator<char>(in),
-              std::istreambuf_iterator<char>(),
-              std::ostreambuf_iterator<char>(file)
-    );
-    file.close();
-    return true;
-}
-
-class SingleLine {
-public:
-    SingleLine(FDOStream &out_, int code) : out(out_) {
-        out << code << ' ';
-    }
-
-    ~SingleLine() {
-        out << "\r\n";
-        out.flush();
-    }
-
-    template <class T>
-    SingleLine& operator<<(const T &t) {
-        out << t;
-        return *this;
-    }
-
-    FDOStream &out;
-};
-
-struct NewLine{ };
-struct LastLine{ };
-
-class MultiLine {
-public:
-    MultiLine(FDOStream &out_, int code_) : out(out_), code(code_) {
-        out << code << '-';
-    }
-
-    ~MultiLine() {
-        out << "\r\n";
-        out.flush();
-    }
-
-    MultiLine& operator<<(NewLine) {
-        out << "\r\n";
-        return *this;
-    }
-
-    MultiLine& operator<<(LastLine) {
-        out << code << ' ';
-        return *this;
-    }
-
-    template <class T>
-    MultiLine& operator<<(const T &t) {
-        out << t;
-        return *this;
-    }
-
-    FDOStream &out;
-    int code;
-};
-
-/// Read till \r\n
-static std::string read_till_end(FDIStream &in) {
-    in.clear();
-    std::string res;
-    int c;
-    bool prev_correct = false;
-    while ((c = in.get()) != EOF) {
-        if (c == '\r') {
-            prev_correct = true;
-        } else if (c == '\n' && prev_correct) {
-            return res;
-        } else {
-            if (prev_correct) {
-                res.push_back('\r');
-                prev_correct = false;
-            }
-            res.push_back(c);
-        }
-    }
-    return res;
-}
+#include "server.hpp"
+#include "tools.hpp"
 
 template <class F>
 class Operation {
@@ -442,7 +34,7 @@ public:
 
     virtual bool operator()(F &f) = 0;
 
-    virtual bool process(FDOStream &control, int fd) {
+    virtual bool process(FDOStream &control, int fd, ModeType mode) {
         throw std::runtime_error("Empty process");
     }
 };
@@ -550,7 +142,20 @@ class Type : public Operation<F> {
 public:
     bool operator()(F &f) override {
         auto type = read_till_end(f.in);
+        if (!type.empty()) {
+            type[0] = toupper(type[0]);
+        }
+        if (type.size() > 1) {
+            type[1] = toupper(type[1]);
+        }
+        if (type.size() > 2) {
+            type[2] = toupper(type[2]);
+        }
         if (type == "AN") {
+            SingleLine(f.out, 200) << "OK.";
+            return true;
+        }
+        if (type == "A") {
             SingleLine(f.out, 200) << "OK.";
             return true;
         }
@@ -558,7 +163,7 @@ public:
             SingleLine(f.out, 200) << "OK.";
             return true;
         }
-        SingleLine(f.out, 504) << "Only 8bit ASCII non-print supported.";
+        SingleLine(f.out, 504) << "Only 8bit ASCII non-print supported, not " + type + ".";
         return true;
     }
 };
@@ -568,16 +173,22 @@ class Mode : public Operation<F> {
 public:
     bool operator()(F &f) override {
         auto type = read_till_end(f.in);
+        if (!type.empty()) {
+            type[0] = toupper(type[0]);
+        }
         if (type == "S") {
+            f.mode = ModeType::Stream;
             SingleLine(f.out, 200) << "OK.";
             return true;
         }
         if (type == "B") {
-            SingleLine(f.out, 504) << "Not OK.";
+            f.mode = ModeType::Block;
+            SingleLine(f.out, 200) << "OK.";
             return true;
         }
         if (type == "C") {
-            SingleLine(f.out, 504) << "Not OK.";
+            f.mode = ModeType::Compressed;
+            SingleLine(f.out, 200) << "OK.";
             return true;
         }
         SingleLine(f.out, 500) << "Unknown mode.";
@@ -590,6 +201,9 @@ class Stru : public Operation<F> {
 public:
     bool operator()(F &f) override {
         auto type = read_till_end(f.in);
+        if (!type.empty()) {
+            type[0] = toupper(type[0]);
+        }
         if (type == "F") {  /// File
             SingleLine(f.out, 200) << "OK.";
             return true;
@@ -647,7 +261,7 @@ public:
         return true;
     }
 
-    bool process(FDOStream&, int) override {
+    bool process(FDOStream&, int, ModeType) override {
         /// Kostyil'. Checking that has access by uid
         if (chdir(path.c_str()) != 0) {
             exit(1);
@@ -674,7 +288,7 @@ public:
         return true;
     }
 
-    bool process(FDOStream &out, int) override {
+    bool process(FDOStream &out, int, ModeType) override {
         if (!check_folder_exists_access(path)) {
             SingleLine(out, 550) << "Incorrect path.";
             return true;
@@ -704,7 +318,7 @@ public:
         return true;
     }
 
-    bool process(FDOStream &out, int) override {
+    bool process(FDOStream &out, int, ModeType) override {
         if (check_folder_exists_access(path)) {
             SingleLine(out, 550) << "Path already exists.";
             return true;
@@ -736,7 +350,7 @@ public:
         return true;
     }
 
-    bool process(FDOStream &out, int) override {
+    bool process(FDOStream &out, int, ModeType) override {
         if (!check_file_read_access(path)) {
             SingleLine(out, 550) << "Incorrect path.";
             return true;
@@ -840,8 +454,6 @@ public:
     }
 };
 
-/// TODO From here
-
 template <class F>
 class Pasv : public Operation<F> {
 public:
@@ -864,7 +476,10 @@ public:
             SingleLine(f.out, 500) << "Internal error";
             return true;
         }
-        SingleLine(f.out, 227) << "Passive mode (0,0,0,0,"
+        auto addr = f.settings.bind_host;
+        std::transform(addr.begin(), addr.end(), addr.begin(),
+                       [](unsigned char c){ return c == '.' ? ',' : c; });
+        SingleLine(f.out, 227) << "Passive mode (" + addr + ","
                                << (port >> 8u) << ',' << (port & ((1u << 8u) - 1)) << ")";
         return true;
     }
@@ -873,7 +488,9 @@ public:
 template <class F>
 class List : public Operation<F> {
 public:
-    List(std::string command_="ls -l") : command(std::move(command_)) {
+    List(std::string command_="ls -l", std::string postfix_="")
+        : command(std::move(command_))
+        , postfix(std::move(postfix_)){
         command.push_back(' ');
     }
 
@@ -886,7 +503,7 @@ public:
             SingleLine(f.out, 450) << "No such folder.";
             return true;
         }
-        if (!f.data_connect.process(f.out.get_fd(), this)) {
+        if (!f.data_connect.process(f.out.get_fd(), this, f.mode)) {
             /// Kostyil
             SingleLine(f.out, 150) << "No ways to leave.";
             SingleLine(f.out, 451) << "No ways to live.";
@@ -896,10 +513,19 @@ public:
         return true;
     }
 
-    bool process(FDOStream &control, int fd) override {
-        FDOStream out(fd);
-        std::string cmd = command + path;
-        auto result = run_command(cmd, out);
+    bool process(FDOStream &control, int fd, ModeType mode) override {
+        std::string cmd = command + path + postfix;
+        bool result;
+        if (mode == ModeType::Stream) {
+            FDOStream out(fd);
+            result = run_command(cmd, out);
+        } else if (mode == ModeType::Block) {
+            ModeBlockOStream out(fd);
+            result = run_command(cmd, out);
+        } else {
+            ModeCompressedOStream out(fd);
+            result = run_command(cmd, out);
+        }
         if (result) {
             SingleLine(control, 226) << "Success";
         }
@@ -908,6 +534,7 @@ public:
 
     std::string path;
     std::string command;
+    std::string postfix;
 };
 
 template <class F>
@@ -926,7 +553,7 @@ public:
             SingleLine(f.out, 550) << "No access.";
             return true;
         }
-        if (!f.data_connect.process(f.out.get_fd(), this)) {
+        if (!f.data_connect.process(f.out.get_fd(), this, f.mode)) {
             /// Kostyil
             SingleLine(f.out, 150) << "No ways to leave.";
             SingleLine(f.out, 451) << "No ways to live.";
@@ -936,9 +563,18 @@ public:
         return true;
     }
 
-    bool process(FDOStream &control, int fd) override {
-        FDOStream out(fd);
-        auto result = run_command("cat " + path, out);
+    bool process(FDOStream &control, int fd, ModeType mode) override {
+        bool result;
+        if (mode == ModeType::Stream) {
+            FDOStream out(fd);
+            result = run_command("cat " + path, out);
+        } else if (mode == ModeType::Block) {
+            ModeBlockOStream out(fd);
+            result = run_command("cat " + path, out);
+        } else {
+            ModeCompressedOStream out(fd);
+            result = run_command("cat " + path, out);;
+        }
         if (result) {
             SingleLine(control, 226) << "Success.";
         }
@@ -951,7 +587,7 @@ public:
 template <class F>
 class iStor : public Operation<F> {
 public:
-    iStor(int mode_=O_CREAT) : mode(mode_) { }
+    iStor(int mode = O_CREAT) : filemode(mode) { }
 
     bool operator()(F &f) override {
         path = read_till_end(f.in);
@@ -962,11 +598,11 @@ public:
             SingleLine(f.out, 501) << "Path should be specified.";
             return true;
         }
-        if (!check_file_write_access(path, mode)) {
+        if (!check_file_write_access(path, filemode)) {
             SingleLine(f.out, 550) << "No access.";
             return true;
         }
-        if (!f.data_connect.process(f.out.get_fd(), this)) {
+        if (!f.data_connect.process(f.out.get_fd(), this, f.mode)) {
             /// Kostyil
             SingleLine(f.out, 150) << "No ways to leave.";
             SingleLine(f.out, 451) << "No ways to live.";
@@ -976,9 +612,18 @@ public:
         return true;
     }
 
-    bool process(FDOStream &control, int fd) override {
-        FDIStream in(fd);
-        auto result = write_file(path, mode, in);
+    bool process(FDOStream &control, int fd, ModeType mode) override {
+        bool result;
+        if (mode == ModeType::Stream) {
+            FDIStream in(fd);
+            result = write_file(path, filemode, in);
+        } else if (mode == ModeType::Block) {
+            ModeBlockIStream in(fd);
+            result = write_file(path, filemode, in);
+        } else {
+            ModeCompressedIStream in(fd);
+            result = write_file(path, filemode, in);
+        }
         if (result) {
             SingleLine(control, 226) << "Success.";
         }
@@ -986,7 +631,7 @@ public:
     }
 
     std::string path;
-    int mode;
+    int filemode;
 };
 
 template <class F>
@@ -997,7 +642,7 @@ public:
         if (!f.check_data_connect()) {
             return true;
         }
-        if (!f.data_connect.process(f.out.get_fd(), this)) {
+        if (!f.data_connect.process(f.out.get_fd(), this, f.mode)) {
             /// Kostyil
             SingleLine(f.out, 150) << "No ways to leave.";
             SingleLine(f.out, 451) << "No ways to live.";
@@ -1007,42 +652,24 @@ public:
         return true;
     }
 
-    bool process(FDOStream &control, int fd) override {
-        FDOStream out(fd);
-        auto result = run_command("sleep 20", out);
+    bool process(FDOStream &control, int fd, ModeType mode) override {
+        bool result;
+        if (mode == ModeType::Stream) {
+            FDOStream out(fd);
+            result = run_command("sleep 20", out);
+        } else if (mode == ModeType::Block) {
+            ModeBlockOStream out(fd);
+            result = run_command("sleep 20", out);
+        } else {
+            ModeCompressedOStream out(fd);
+            result = run_command("sleep 20", out);
+        }
         if (result) {
             SingleLine(control, 226) << "Success.";
         }
         return result;
     }
 };
-
-std::tuple<std::map<std::string, std::string>, bool> read_db(const std::string &filename,
-                                                             const std::optional<std::string> &is_disabled) {
-    bool need_login = !is_disabled || is_disabled.value() != "1";
-
-    if (!need_login) {
-        return {{}, need_login};
-    }
-
-    std::map<std::string, std::string> passes;
-    std::ifstream file;
-    file.open(filename, std::ios_base::in);
-    std::string line;
-    std::getline(file, line);
-    while (!file.eof()) {
-        std::getline(file, line);
-        if (line.back() == '\n') {
-            line.pop_back();
-        }
-        auto pos = line.find('\t');
-        if (line.find('\t', pos + 1) != std::string::npos) {
-            throw std::runtime_error("Bad file format");
-        }
-        passes[line.substr(0, pos)] = line.substr(pos + 1);
-    }
-    return std::make_tuple(std::move(passes), need_login);
-}
 
 // Global? Yes, it is.
 pam_response *reply{};
@@ -1224,7 +851,7 @@ public:
         return false;
     }
 
-    bool process(int fd_control, Operation<F>* op) {
+    bool process(int fd_control, Operation<F>* op, ModeType mode) {
         if (!is_ready()) {
             throw std::runtime_error("Not valid process");
         }
@@ -1244,7 +871,7 @@ public:
                 SingleLine(control, 425) << "Can not open data connection";
                 exit(6);
             }
-            if (!op->process(control, user)) {
+            if (!op->process(control, user, mode)) {
                 SingleLine(control, 451) << "Internal Error";
                 exit(1);
             }
@@ -1321,7 +948,7 @@ public:
         functions["STRU"] = std::make_unique<Stru<FTP>>();
 
         functions["NOOP"] = std::make_unique<Noop<FTP>>();
-        functions["LIST"] = std::make_unique<List<FTP>>();
+        functions["LIST"] = std::make_unique<List<FTP>>("ls -l", " | tail +2");
         functions["RETR"] = std::make_unique<Retr<FTP>>();
         functions["STOR"] = std::make_unique<iStor<FTP>>();
 
@@ -1362,7 +989,7 @@ public:
                     exit(5);
                 }
             }
-            if (!op->process(out, -1)) {
+            if (!op->process(out, -1, ModeType::Stream)) {
                 SingleLine(out, 421) << "Internal Error";
                 exit(1);
             }
@@ -1409,28 +1036,12 @@ public:
     std::string username;
     DataConnect<FTP> data_connect;
     uid_t uid = -1;
+    ModeType mode = ModeType::Stream;
 
     const Settings &settings;
 };
 
 void empty(int signum) { }
-
-std::optional<std::string> parse_env(const std::string &name) {
-    char * str = getenv(name.c_str());
-    if (str == nullptr) {
-        return {};
-    }
-    return std::string(str);
-}
-
-std::string parse_env_req(const std::string &name) {
-    char * str = getenv(name.c_str());
-    if (str == nullptr) {
-        std::cerr << "Specify " << name << std::endl;
-        exit(1);
-    }
-    return str;
-}
 
 int main(int args, char **argv) {
     signal(SIGPIPE, empty);

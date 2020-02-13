@@ -3,5 +3,9 @@ project(ftp)
 
 set(CMAKE_CXX_STANDARD 17)
 
-add_executable(ftp main.cpp)
+include_directories(include)
+
+FILE(GLOB FTP_SOURCES main.cpp "include/*.hpp")
+add_executable(ftp ${FTP_SOURCES})
+
 target_link_libraries(ftp pam)
