@@ -87,32 +87,13 @@ public:
 };
 
 template <class F>
-class LoginNeed : public Operation<F> {
-public:
-    bool operator()(F &f) override {
-        read_till_end(f.in);
-        SingleLine(f.out, 530) << "Please log in.";
-        return true;
-    }
-};
-
-template <class F>
-class NoFunc : public Operation<F> {
-public:
-    bool operator()(F &f) override {
-        read_till_end(f.in);
-        SingleLine(f.out, 502) << "No such command.";
-        return true;
-    }
-};
-
-template <class F>
 class Abort : public Operation<F> {
 public:
     bool operator()(F &f) override {
         read_till_end(f.in);
         if (f.data_connect.is_done()) {
             SingleLine(f.out, 502) << "No active data connection.";
+            return true;
         }
         f.data_connect.kill();
         if (f.data_connect.is_ready()) {
@@ -359,12 +340,21 @@ template <class F>
 class Port : public Operation<F> {
 public:
     bool operator()(F &f) override {
-        if (!f.data_connect.is_done()) {
+        if (!f.data_connect.is_ready() && !f.data_connect.is_done()) {
             read_till_end(f.in);
             SingleLine(f.out, 500) << "Already running other";
             return true;
         }
+        if (!f.data_connect.clear()) {
+            SingleLine(f.out, 500) << "Internal error.";
+            return true;
+        }
         unsigned h1, h2, h3, h4, p1, p2;
+        if (!isdigit(f.in.peek())) {
+            read_till_end(f.in);
+            SingleLine(f.out, 501) << "Bad format.";
+            return true;
+        }
         if (!(f.in >> h1)) {
             read_till_end(f.in);
             SingleLine(f.out, 501) << "Bad format.";
@@ -425,6 +415,11 @@ public:
             SingleLine(f.out, 501) << "Bad format.";
             return true;
         }
+        if (h1 >= 256 || h2 >= 256 || h3 >= 256 || h4 >= 256 || p1 >= 256 || p2 >= 256) {
+            read_till_end(f.in);
+            SingleLine(f.out, 501) << "Bad format.";
+            return true;
+        }
         if (!read_till_end(f.in).empty()) {
             SingleLine(f.out, 501) << "Bad format. Extra data found.";
             return true;
@@ -445,9 +440,13 @@ template <class F>
 class Pasv : public Operation<F> {
 public:
     bool operator()(F &f) override {
-        if (!f.data_connect.is_done()) {
+        if (!f.data_connect.is_ready() && !f.data_connect.is_done()) {
             read_till_end(f.in);
             SingleLine(f.out, 500) << "Already running other";
+            return true;
+        }
+        if (!f.data_connect.clear()) {
+            SingleLine(f.out, 500) << "Internal error.";
             return true;
         }
         unsigned port = 10000;// + rand() % 10;
@@ -475,7 +474,7 @@ public:
 template <class F>
 class List : public Operation<F> {
 public:
-    List(std::string command_="ls -l", std::string postfix_="")
+    explicit List(std::string command_="ls -l", std::string postfix_="")
         : command(std::move(command_))
         , postfix(std::move(postfix_)){
         command.push_back(' ');
@@ -560,7 +559,7 @@ public:
             result = run_command("cat " + path, out);
         } else {
             ModeCompressedOStream out(fd);
-            result = run_command("cat " + path, out);;
+            result = run_command("cat " + path, out);
         }
         if (result) {
             SingleLine(control, 226) << "Success.";
@@ -572,9 +571,9 @@ public:
 };
 
 template <class F>
-class iStor : public Operation<F> {
+class Stor : public Operation<F> {
 public:
-    iStor(int mode = O_CREAT) : filemode(mode) { }
+    explicit Stor(int mode = O_CREAT) : filemode(mode) { }
 
     bool operator()(F &f) override {
         path = read_till_end(f.in);
@@ -661,8 +660,8 @@ public:
 // Global? Yes, it is.
 pam_response *reply{};
 
-int function_conversation(int num_msg, const struct pam_message **msg,
-                          struct pam_response **resp, void *appdata_ptr) {
+int function_conversation(int /*num_msg*/, const struct pam_message **/*msg*/,
+                          struct pam_response **resp, void */*appdata_ptr*/) {
     *resp = reply;
     return PAM_SUCCESS;
 }
@@ -745,14 +744,31 @@ class User : public Operation<F> {
 public:
     bool operator()(F &f) override {
         f.username = read_till_end(f.in);
-        SingleLine(f.out, 331) << "Need password";
-        f.functions.clear();
+        if (!f.settings.need_login) {
+            SingleLine(f.out, 230) << "Success.";
+            f.add_user_functions();
+            return true;
+        }
+        SingleLine(f.out, 331) << "Need password.";
+        f.set_clear_functions();
         f.functions["PASS"] = std::make_unique<Pass<F>>();
-        f.functions["USER"] = std::make_unique<User<F>>();
-        f.functions["HELP"] = std::make_unique<Help<F>>();
-        f.functions["QUIT"] = std::make_unique<Quit<F>>();
         return true;
     }
+};
+
+template <class F>
+class StaticOperation : public Operation<F> {
+public:
+    StaticOperation(int code_, std::string text_) : code(code_), text(std::move(text_)) { }
+
+    bool operator()(F &f) override {
+        read_till_end(f.in);
+        SingleLine(f.out, code) << text;
+        return true;
+    }
+
+    int code;
+    std::string text;
 };
 
 template <class F>
@@ -774,19 +790,7 @@ class DataConnect {
 
     int open_data_connection() {
         if (state == State::kReadyOut) {
-            int sock;
-            if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-                return -1;
-            }
-            struct sockaddr_in serv_addr{};
-            serv_addr.sin_family = AF_INET;
-            serv_addr.sin_port = htons(port);
-            serv_addr.sin_addr.s_addr = htonl(ip);
-            if (connect(sock, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) {
-                close(sock);
-                return -1;
-            }
-            return sock;
+            return open_connection(ip, port);
         }
         if (state == State::kReadyIn) {
              return server->accept_one();
@@ -855,7 +859,7 @@ public:
             int user = open_data_connection();
             FDOStream control(fd_control);
             if (user == -1) {
-                SingleLine(control, 425) << "Can not open data connection";
+                SingleLine(control, 451) << "Can not open data connection";
                 exit(6);
             }
             if (!op->process(control, user, mode)) {
@@ -873,6 +877,15 @@ public:
 
     void set_uid(uid_t uid_) {
         uid = uid_;
+    }
+
+    bool clear() {
+        if (state == State::kExecution) {
+            return false;
+        }
+        server.reset();
+        state = State::kNone;
+        return true;
     }
 
     bool set_passive(Server<void> &&s) {
@@ -906,7 +919,6 @@ public:
 
     explicit FTP(int fd, const Settings &settings_) : in(fd), out(fd), settings(settings_) {
         in.dismiss();
-        struct timeval timeout{30, 0};
         if (!set_timeout_fd(fd, SO_RCVTIMEO)) {
             close(fd);
             throw std::runtime_error("Can not set rcv timeout");
@@ -915,14 +927,8 @@ public:
             close(fd);
             throw std::runtime_error("Can not set snd timeout");
         }
-        functions["HELP"] = std::make_unique<Help<FTP>>();
-        functions["QUIT"] = std::make_unique<Quit<FTP>>();
-        if (settings.need_login) {
-            functions["USER"] = std::make_unique<User<FTP>>();
-            default_function = std::make_unique<LoginNeed<FTP>>();
-        } else {
-            add_user_functions();
-        }
+        set_clear_functions();
+        default_function = std::make_unique<StaticOperation<FTP>>(530, "Please log in.");
     }
 
     void add_user_functions() {
@@ -937,19 +943,27 @@ public:
         functions["NOOP"] = std::make_unique<Noop<FTP>>();
         functions["LIST"] = std::make_unique<List<FTP>>("ls -l", " | tail +2");
         functions["RETR"] = std::make_unique<Retr<FTP>>();
-        functions["STOR"] = std::make_unique<iStor<FTP>>();
+        functions["STOR"] = std::make_unique<Stor<FTP>>();
 
         functions["CDUP"] = std::make_unique<CDUp<FTP>>();
         functions["CWD"] = std::make_unique<CWD<FTP>>();
-        functions["APPE"] = std::make_unique<iStor<FTP>>(O_CREAT | O_APPEND);
+        functions["APPE"] = std::make_unique<Stor<FTP>>(O_CREAT | O_APPEND);
         functions["DELE"] = std::make_unique<Dele<FTP>>();
         functions["RMD"] = std::make_unique<RMD<FTP>>();
         functions["MKD"] = std::make_unique<MKD<FTP>>();
         functions["NLST"] = std::make_unique<List<FTP>>("ls -1");
 
-        functions["NOOP"] = std::make_unique<Noop<FTP>>();
         functions["SLEEP"] = std::make_unique<Sleep<FTP>>();
-        default_function = std::make_unique<NoFunc<FTP>>();
+
+        default_function = std::make_unique<StaticOperation<FTP>>(502, "No such command.");
+    }
+
+    void set_clear_functions() {
+        functions.clear();
+        functions["USER"] = std::make_unique<User<FTP>>();
+        functions["HELP"] = std::make_unique<Help<FTP>>();
+        functions["QUIT"] = std::make_unique<Quit<FTP>>();
+        functions["NOOP"] = std::make_unique<Noop<FTP>>();
     }
 
     bool check_data_connect() {
@@ -957,6 +971,7 @@ public:
             return true;
         }
         if (data_connect.is_done()) {
+            SingleLine(out, 125) << "Kostyil'.";
             SingleLine(out, 425) << "Open data connection firstly by PASV or PORT.";
             return false;
         }
@@ -1004,14 +1019,19 @@ public:
             }
             std::transform(command.begin(), command.end(), command.begin(),
                            [](unsigned char c){ return std::toupper(c); });
-            auto it = functions.find(command);
-            if (it != functions.end()) {
-                if (!(*it->second)(*this)) {
-                    break;
+            try {
+                auto it = functions.find(command);
+                if (it != functions.end()) {
+                    if (!(*it->second)(*this)) {
+                        break;
+                    }
+                    continue;
                 }
-                continue;
+                (*default_function)(*this);
+            } catch (const std::exception &e) {
+                std::cerr << e.what() << std::endl;
+                break;
             }
-            (*default_function)(*this);
         }
         if (!in.good()) {
             SingleLine(out, 421) << "Timeout.";
@@ -1028,9 +1048,9 @@ public:
     const Settings &settings;
 };
 
-void empty(int signum) { }
+void empty(int /*signum*/) { }
 
-int main(int args, char **argv) {
+int main() {
     signal(SIGPIPE, empty);
 
     FTP::Settings settings{};
@@ -1050,5 +1070,5 @@ int main(int args, char **argv) {
         return 1;
     }
 
-    Server<FTP>(settings.bind_host, strtol(bind_port.c_str(), nullptr, 10)).run(settings);
+    Server<FTP>(settings.bind_host, strtoul(bind_port.c_str(), nullptr, 10)).run(settings);
 }
