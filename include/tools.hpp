@@ -44,11 +44,11 @@ int open_connection(unsigned ip, unsigned port) {
     if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
         return -1;
     }
-//    int synRetries = 1;
-//    if (setsockopt(sock, IPPROTO_TCP, TCP_SYNCNT, &synRetries, sizeof(synRetries)) < 0) {
-//        close(sock);
-//        return -1;
-//    }
+    int synRetries = 1;
+    if (setsockopt(sock, IPPROTO_TCP, TCP_SYNCNT, &synRetries, sizeof(synRetries)) < 0) {
+        close(sock);
+        return -1;
+    }
     struct sockaddr_in serv_addr{};
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(port);

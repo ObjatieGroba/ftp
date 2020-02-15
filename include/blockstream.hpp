@@ -158,6 +158,10 @@ public:
         rdbuf(&buf_);
     }
 
+    ~ModeBlockOStream() final {
+        flush();
+    }
+
     int dismiss() {
         return buf_.dismiss();
     }

@@ -64,6 +64,21 @@ public:
         }
     }
 
+    template <class Func>
+    bool run_one(Func func) {
+        int user_sock;
+        if ((user_sock = accept(sock_, nullptr, nullptr)) != -1) {
+            try {
+                func(user_sock);
+                return true;
+            } catch (const std::exception& e) {
+                std::cerr << e.what() << '\n';
+                return false;
+            }
+        }
+        return false;
+    }
+
     int accept_one() {
         struct timeval tv{};
         fd_set rfds;

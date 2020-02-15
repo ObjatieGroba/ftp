@@ -109,6 +109,9 @@ protected:
     }
 
     int underflow() final {
+        if (in_size_ == -1) {
+            return EOF;
+        }
         if (in_cur_ != in_size_) {
             return in_buf_[in_cur_];
         }
@@ -128,6 +131,9 @@ protected:
     }
 
     int uflow() final {
+        if (in_size_ == -1) {
+            return EOF;
+        }
         if (in_cur_ != in_size_) {
             return in_buf_[in_cur_++];
         }
@@ -171,6 +177,10 @@ public:
         rdbuf(&buf_);
     }
 
+    ~FDOStream() final {
+        flush();
+    }
+
     int dismiss() {
         return buf_.dismiss();
     }
@@ -203,6 +213,10 @@ protected:
 public:
     explicit FDIOStream(int fd) : std::iostream(nullptr), buf_(fd) {
         rdbuf(&buf_);
+    }
+
+    ~FDIOStream() final {
+        flush();
     }
 
     int dismiss() {

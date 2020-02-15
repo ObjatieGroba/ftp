@@ -219,6 +219,10 @@ public:
         rdbuf(&buf_);
     }
 
+    ~ModeCompressedOStream() final {
+        flush();
+    }
+
     int dismiss() {
         return buf_.dismiss();
     }
