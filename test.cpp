@@ -4,6 +4,7 @@
 #include <memory>
 #include <vector>
 #include <algorithm>
+#include <thread>
 
 #include "tools.hpp"
 
@@ -81,12 +82,14 @@ public:
             if (s[3] != ' ' && s[3] != '-') {
                 return {"Bad reply format"};
             }
+            std::cout << s << std::endl;
             unsigned code = (s[0] - '0') * 100 + (s[1] - '0') * 10 + (s[2] - '0');
             std::string wait_till = s.substr(0, 4);
             wait_till[3] = ' ';
             std::string data;
             while (s.substr(0, wait_till.size()) != wait_till) {
                 s = read_till_end(in);
+                std::cout << s << std::endl;
             }
             std::transform(command.begin(), command.end(), command.begin(), [](char c){ return toupper(c); });
             if (send) {
@@ -98,7 +101,7 @@ public:
                     return {"Not allowed code " + std::to_string(code) + " on " + command};
                 }
             }
-            std::cout << command << ' ' << code << std::endl;
+            // std::cout << command << ' ' << code << std::endl;
             return {code};
         } catch (const std::exception &e) {
             return {std::string(e.what())};
@@ -168,8 +171,14 @@ const std::map<std::string, std::vector<int>> FTPClient::allowed_second_codes = 
 
 class Test {
 protected:
-
-    Test(unsigned ip_, unsigned port_) : ip(ip_), port(port_) { };
+    Test(std::string myip_, unsigned ip_, unsigned port_)
+        : myip(std::move(myip_)), port_arg(myip), myport(9998), ip(ip_), port(port_) {
+        std::transform(port_arg.begin(), port_arg.end(), port_arg.begin(), [](char c) { return c == '.' ? ',' : c; });
+        port_arg.push_back(',');
+        port_arg += std::to_string(myport >> 8u);
+        port_arg.push_back(',');
+        port_arg += std::to_string(myport & ((1u << 8u) - 1));
+    };
 
     Result test_all_codes(FTPClient &client) const {
         for (auto &&cmd : FTPClient::allowed_codes) {
@@ -221,6 +230,9 @@ protected:
         return {0};
     }
 
+    std::string myip;
+    std::string port_arg;
+    unsigned myport;
     unsigned ip;
     unsigned port;
 
@@ -232,6 +244,32 @@ public:
 #define test(name) \
 if (enable_output) {\
     std::cerr << "TEST " << name << std::endl;\
+}\
+
+bool check_res_code(int code, std::vector<int> codes) {
+    for (auto c : codes) {
+        if (c == code) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string print(std::vector<int> codes) {
+    std::string res;
+    for (auto code : codes) {
+        res += std::to_string(code) + ',';
+    }
+    res.pop_back();
+    return std::move(res);
+}
+
+#define req_code(ccodes...) \
+if (!check_res_code(res.code, {ccodes})) {\
+    if (enable_output) {\
+        std::cerr << "Not valid code " << res.code << " expected " << print({ccodes}) << std::endl;\
+    }\
+    return false;\
 }\
 
 #define open_server() \
@@ -262,7 +300,8 @@ if (res.code == 331) {\
         }\
         return false;\
     }\
-}
+}\
+req_code(230)
 
 #define test_run(func) \
 res = func;\
@@ -273,17 +312,29 @@ if (!res.error.empty()) {\
     return false;\
 }\
 
-#define req_code(ccode) \
-if (res.code != ccode) {\
+#define test_run_while_100(func_name, args)\
+test_run(client.run(func_name, true, args))\
+while (res.error.empty() && (res.code / 100) == 1) {\
+    res = client.run(func_name, false);\
+}\
+if (!res.error.empty()) {\
     if (enable_output) {\
-        std::cerr << "Not valid code " << res.code << " expected " << ccode << std::endl;\
+        std::cerr << res.error << std::endl;\
     }\
     return false;\
 }\
 
+#define require_eq(a, etalon, text)\
+if (a != etalon) {\
+    if (enable_output) {\
+        std::cerr << text << std::endl;\
+    }\
+    return false;\
+}
+
 class MinimalTest : public Test {
 public:
-    MinimalTest(unsigned ip, unsigned port) : Test(ip, port) { }
+    MinimalTest(std::string myip, unsigned ip, unsigned port) : Test(std::move(myip), ip, port) { }
 
     bool operator()(bool enable_output) const final {
         {
@@ -303,6 +354,66 @@ public:
 
             test_run( client.run("NOOP"))
             req_code(200)
+
+            /// Port change
+            test_run( client.run("PORT", true, "1,2,3,4,5,6"))
+            req_code(200)
+            test_run( client.run("PORT", true, "4,4,4,4,0,80"))
+            req_code(200)
+        }
+        {
+            test("Relogin")
+            open_server_auth("anonymous", "anonymous")
+
+            test_run(client.run("USER", true, "abcde"))
+            req_code(230)
+            test_run(client.run("USER", true, "anonymous"))
+            req_code(230)
+        }
+        {
+            test("Data send and recv")
+            open_server_auth("anonymous", "anonymous")
+
+            const std::string text = "abcde\n";
+            Server<int> server(myip, myport);
+
+            std::thread([&]() {
+                if (!server.run_one([&](int fd) {
+                    set_timeout_fd(fd, SO_SNDTIMEO, 1);
+                    FDOStream out(fd);
+                    out << text;
+                })) {
+                    if (enable_output) {
+                        std::cerr << "Server run fail\n";
+                    }
+                }
+            }).detach();
+            test_run(client.run("PORT", true, port_arg))
+            req_code(200)
+            test_run_while_100("STOR", "test_file_001")
+            req_code(226, 250)
+
+            std::string response;
+            std::thread([&]() {
+                if (!server.run_one([&](int fd) {
+                    set_timeout_fd(fd, SO_RCVTIMEO, 1);
+                    FDIStream in(fd);
+                    std::copy(std::istreambuf_iterator<char>(in),
+                              std::istreambuf_iterator<char>(),
+                              std::back_inserter(response)
+                    );
+                    in >> response;
+                })) {
+                    if (enable_output) {
+                        std::cerr << "Server run fail\n";
+                    }
+                }
+            }).detach();
+            test_run(client.run("PORT", true, port_arg))
+            req_code(200)
+            test_run_while_100("RETR", "test_file_001")
+            req_code(226, 250)
+            require_eq(response, text, "Expected equal file");
         }
         {
             test("Without login")
@@ -334,11 +445,21 @@ int main() {
     auto quiet = parse_env("HW1_QUIET");
     bool enable_output = !quiet || (quiet.value() != "1");
 
+    std::string myip;
+    {
+        std::ostringstream ss;
+        run_command("ip route get " + shost + " | python3 -c \"print(input().split()[-3])\"", ss);
+        myip = ss.str();
+        while (isspace(myip.back())) {
+            myip.pop_back();
+        }
+    }
+
     unsigned ip = htonl(inet_addr(shost.c_str()));
     unsigned port = strtoul(sport.c_str(), nullptr, 10);
 
     std::map<std::string, std::unique_ptr<Test>> tests;
-    tests["minimal"] = std::make_unique<MinimalTest>(ip, port);
+    tests["minimal"] = std::make_unique<MinimalTest>(myip, ip, port);
 
     if (test) {
         const auto &ptest = tests[test.value()];

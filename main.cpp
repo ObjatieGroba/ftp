@@ -1,6 +1,8 @@
 #include <algorithm>
 #include <memory>
 #include <optional>
+#include <thread>
+#include <chrono>
 
 #include <sys/stat.h>
 #include <security/pam_appl.h>
@@ -834,6 +836,7 @@ public:
             return false;
         }
         int status;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
         waitpid(child_, &status, WNOHANG);
         if (::kill(child_, 0) != 0) {
             state = State::kNone;
