@@ -21,7 +21,7 @@ public:
 
     virtual ~Operation() = default;
 
-    virtual bool operator()(F &f) = 0;
+    virtual bool operator()(F &f, std::string arg) = 0;
 
     virtual bool process(FDOStream &control, int fd, ModeType mode) {
         throw std::runtime_error("Empty process");
@@ -31,8 +31,8 @@ public:
 template <class F>
 class Noop : public Operation<F> {
 public:
-    bool operator()(F &f) override {
-        if (!read_till_end(f.in).empty()) {
+    bool operator()(F &f, std::string arg) override {
+        if (!arg.empty()) {
             MultiLine(f.out, 500) << "Syntax error. Extra data found." << NewLine()
                                   << "      ,~~.    " << NewLine()
                                   << "     (  9 )-_," << NewLine()
@@ -53,8 +53,7 @@ public:
 template <class F>
 class Help : public Operation<F> {
 public:
-    bool operator()(F &f) override {
-        read_till_end(f.in);
+    bool operator()(F &f, std::string arg) override {
         auto out = MultiLine(f.out, 214);
         out << "You can use following queries:" << NewLine{};
         int cnt = 5;
@@ -78,8 +77,8 @@ public:
 template <class F>
 class Quit : public Operation<F> {
 public:
-    bool operator()(F &f) override {
-        if (!read_till_end(f.in).empty()) {
+    bool operator()(F &f, std::string arg) override {
+        if (!arg.empty()) {
             SingleLine(f.out, 500) << "Syntax error. Extra data found.";
             return true;
         }
@@ -91,8 +90,11 @@ public:
 template <class F>
 class Abort : public Operation<F> {
 public:
-    bool operator()(F &f) override {
-        read_till_end(f.in);
+    bool operator()(F &f, std::string arg) override {
+        if (!arg.empty()) {
+            SingleLine(f.out, 500) << "Syntax error. Extra data found.";
+            return true;
+        }
         if (f.data_connect.is_done()) {
             SingleLine(f.out, 502) << "No active data connection.";
             return true;
@@ -110,8 +112,7 @@ public:
 template <class F>
 class Type : public Operation<F> {
 public:
-    bool operator()(F &f) override {
-        auto type = read_till_end(f.in);
+    bool operator()(F &f, std::string type) override {
         if (!type.empty()) {
             type[0] = toupper(type[0]);
         }
@@ -141,8 +142,7 @@ public:
 template <class F>
 class Mode : public Operation<F> {
 public:
-    bool operator()(F &f) override {
-        auto type = read_till_end(f.in);
+    bool operator()(F &f, std::string type) override {
         if (!type.empty()) {
             type[0] = toupper(type[0]);
         }
@@ -169,8 +169,7 @@ public:
 template <class F>
 class Stru : public Operation<F> {
 public:
-    bool operator()(F &f) override {
-        auto type = read_till_end(f.in);
+    bool operator()(F &f, std::string type) override {
         if (!type.empty()) {
             type[0] = toupper(type[0]);
         }
@@ -194,8 +193,8 @@ public:
 template <class F>
 class CDUp : public Operation<F> {
 public:
-    bool operator()(F &f) override {
-        if (!read_till_end(f.in).empty()) {
+    bool operator()(F &f, std::string arg) override {
+        if (!arg.empty()) {
             SingleLine(f.out, 501) << "Arguments not expected.";
             return true;
         }
@@ -208,8 +207,8 @@ public:
 template <class F>
 class CWD : public Operation<F> {
 public:
-    bool operator()(F &f) override {
-        path = read_till_end(f.in);
+    bool operator()(F &f, std::string arg) override {
+        path = std::move(arg);
         if (path.empty()) {
             SingleLine(f.out, 501) << "Path should be specified.";
             return true;
@@ -245,8 +244,8 @@ public:
 template <class F>
 class RMD : public Operation<F> {
 public:
-    bool operator()(F &f) override {
-        path = read_till_end(f.in);
+    bool operator()(F &f, std::string arg) override {
+        path = std::move(arg);
         if (path.empty()) {
             SingleLine(f.out, 501) << "Path should be specified.";
             return true;
@@ -264,7 +263,7 @@ public:
             return true;
         }
         std::ostringstream ss{};
-        run_command("rm -r " + path, ss);
+        run_command("rm -r '" + path + "'", ss);
         SingleLine(out, 250) << "OK.";
         return true;
     }
@@ -275,8 +274,8 @@ public:
 template <class F>
 class MKD : public Operation<F> {
 public:
-    bool operator()(F &f) override {
-        path = read_till_end(f.in);
+    bool operator()(F &f, std::string arg) override {
+        path = std::move(arg);
         if (path.empty()) {
             SingleLine(f.out, 501) << "Path should be specified.";
             return true;
@@ -293,7 +292,7 @@ public:
             SingleLine(out, 550) << "Path already exists.";
             return true;
         }
-        if (mkdir(path.c_str(), 0600) != 0) {
+        if (mkdir(path.c_str(), 0700) != 0) {
             SingleLine(out, 550) << "No access.";
             return true;
         }
@@ -307,8 +306,8 @@ public:
 template <class F>
 class Dele : public Operation<F> {
 public:
-    bool operator()(F &f) override {
-        path = read_till_end(f.in);
+    bool operator()(F &f, std::string arg) override {
+        path = std::move(arg);
         if (path.empty()) {
             SingleLine(f.out, 501) << "Path should be specified.";
             return true;
@@ -330,7 +329,7 @@ public:
             return true;
         }
         std::ostringstream ss{};
-        run_command("rm " + path, ss);
+        run_command("rm '" + path + "'", ss);
         SingleLine(out, 250) << "OK.";
         return true;
     }
@@ -341,9 +340,9 @@ public:
 template <class F>
 class Port : public Operation<F> {
 public:
-    bool operator()(F &f) override {
+    bool operator()(F &f, std::string arg) override {
+        std::istringstream in(arg);
         if (!f.data_connect.is_ready() && !f.data_connect.is_done()) {
-            read_till_end(f.in);
             SingleLine(f.out, 500) << "Already running other";
             return true;
         }
@@ -352,83 +351,70 @@ public:
             return true;
         }
         unsigned h1, h2, h3, h4, p1, p2;
-        if (!isdigit(f.in.peek())) {
-            read_till_end(f.in);
+        if (!isdigit(in.peek())) {
             SingleLine(f.out, 501) << "Bad format.";
             return true;
         }
-        if (!(f.in >> h1)) {
-            read_till_end(f.in);
+        if (!(in >> h1)) {
             SingleLine(f.out, 501) << "Bad format.";
             return true;
         }
-        if (f.in.peek() != ',') {
-            read_till_end(f.in);
+        if (in.peek() != ',') {
             SingleLine(f.out, 501) << "Bad format.";
             return true;
         }
-        f.in.get();
-        if (!(f.in >> h2)) {
-            read_till_end(f.in);
+        in.get();
+        if (!(in >> h2)) {
             SingleLine(f.out, 501) << "Bad format.";
             return true;
         }
-        if (f.in.peek() != ',') {
-            read_till_end(f.in);
+        if (in.peek() != ',') {
             SingleLine(f.out, 501) << "Bad format.";
             return true;
         }
-        f.in.get();
-        if (!(f.in >> h3)) {
-            read_till_end(f.in);
+        in.get();
+        if (!(in >> h3)) {
             SingleLine(f.out, 501) << "Bad format.";
             return true;
         }
-        if (f.in.peek() != ',') {
-            read_till_end(f.in);
+        if (in.peek() != ',') {
             SingleLine(f.out, 501) << "Bad format.";
             return true;
         }
-        f.in.get();
-        if (!(f.in >> h4)) {
-            read_till_end(f.in);
+        in.get();
+        if (!(in >> h4)) {
             SingleLine(f.out, 501) << "Bad format.";
             return true;
         }
-        if (f.in.peek() != ',') {
-            read_till_end(f.in);
+        if (in.peek() != ',') {
             SingleLine(f.out, 501) << "Bad format";
             return true;
         }
-        f.in.get();
-        if (!(f.in >> p1)) {
-            read_till_end(f.in);
+        in.get();
+        if (!(in >> p1)) {
             SingleLine(f.out, 501) << "Bad format.";
             return true;
         }
-        if (f.in.peek() != ',') {
-            read_till_end(f.in);
+        if (in.peek() != ',') {
             SingleLine(f.out, 501) << "Bad format.";
             return true;
         }
-        f.in.get();
-        if (!(f.in >> p2)) {
-            read_till_end(f.in);
+        in.get();
+        if (!(in >> p2)) {
             SingleLine(f.out, 501) << "Bad format.";
             return true;
         }
         if (h1 >= 256 || h2 >= 256 || h3 >= 256 || h4 >= 256 || p1 >= 256 || p2 >= 256) {
-            read_till_end(f.in);
             SingleLine(f.out, 501) << "Bad format.";
             return true;
         }
-        if (!read_till_end(f.in).empty()) {
+        if (in.get() != EOF) {
             SingleLine(f.out, 501) << "Bad format. Extra data found.";
             return true;
         }
         unsigned ip = (h1 << 24u) + (h2 << 16u) + (h3 << 8u) + h4;
         unsigned port = (p1 << 8u) + p2;
-        std::cerr << "Conn to " << ip << ' ' << port << std::endl;
+        // std::cerr << "Conn to " << ip << ' ' << port << std::endl;
         if (!f.data_connect.set_active(ip, port)) {
             SingleLine(f.out, 500) << "Internal error.";
             return true;
@@ -441,9 +427,12 @@ public:
 template <class F>
 class Pasv : public Operation<F> {
 public:
-    bool operator()(F &f) override {
+    bool operator()(F &f, std::string arg) override {
+        if (!arg.empty()) {
+            SingleLine(f.out, 501) << "Arguments not expected.";
+            return true;
+        }
         if (!f.data_connect.is_ready() && !f.data_connect.is_done()) {
-            read_till_end(f.in);
             SingleLine(f.out, 500) << "Already running other";
             return true;
         }
@@ -451,8 +440,8 @@ public:
             SingleLine(f.out, 500) << "Internal error.";
             return true;
         }
-        unsigned port = 10000;// + rand() % 10;
-        std::cerr << "Listen on " << port << std::endl;
+        unsigned port = 10000 + rand() % 10;
+        // std::cerr << "Listen on " << port << std::endl;
         try {
             Server<void> server(f.settings.bind_host, port, 1);
             if (!f.data_connect.set_passive(std::move(server))) {
@@ -482,8 +471,8 @@ public:
         command.push_back(' ');
     }
 
-    bool operator()(F &f) override {
-        path = read_till_end(f.in);
+    bool operator()(F &f, std::string arg) override {
+        path = std::move(arg);
         if (!f.check_data_connect()) {
             return true;
         }
@@ -502,7 +491,7 @@ public:
     }
 
     bool process(FDOStream &control, int fd, ModeType mode) override {
-        std::string cmd = command + path + postfix;
+        std::string cmd = command + (!path.empty() ? ("'" + path + "'") : "") + postfix;
         bool result;
         if (mode == ModeType::Stream) {
             FDOStream out(fd);
@@ -528,8 +517,8 @@ public:
 template <class F>
 class Retr : public Operation<F> {
 public:
-    bool operator()(F &f) override {
-        path = read_till_end(f.in);
+    bool operator()(F &f, std::string arg) override {
+        path = std::move(arg);
         if (!f.check_data_connect()) {
             return true;
         }
@@ -555,13 +544,13 @@ public:
         bool result;
         if (mode == ModeType::Stream) {
             FDOStream out(fd);
-            result = run_command("cat " + path, out);
+            result = run_command("cat '" + path + "'", out);
         } else if (mode == ModeType::Block) {
             ModeBlockOStream out(fd);
-            result = run_command("cat " + path, out);
+            result = run_command("cat '" + path + "'", out);
         } else {
             ModeCompressedOStream out(fd);
-            result = run_command("cat " + path, out);
+            result = run_command("cat '" + path + "'", out);
         }
         if (result) {
             SingleLine(control, 226) << "Success.";
@@ -577,8 +566,8 @@ class Stor : public Operation<F> {
 public:
     explicit Stor(int mode = O_CREAT) : filemode(mode) { }
 
-    bool operator()(F &f) override {
-        path = read_till_end(f.in);
+    bool operator()(F &f, std::string arg) override {
+        path = std::move(arg);
         if (!f.check_data_connect()) {
             return true;
         }
@@ -601,6 +590,7 @@ public:
     }
 
     bool process(FDOStream &control, int fd, ModeType mode) override {
+        std::this_thread::sleep_for(std::chrono::seconds(11));
         bool result;
         if (mode == ModeType::Stream) {
             FDIStream in(fd);
@@ -625,8 +615,7 @@ public:
 template <class F>
 class Sleep : public Operation<F> {
 public:
-    bool operator()(F &f) override {
-        read_till_end(f.in);
+    bool operator()(F &f, std::string arg) override {
         if (!f.check_data_connect()) {
             return true;
         }
@@ -728,8 +717,7 @@ class Pass : public Operation<F> {
     }
 
 public:
-    bool operator()(F &f) override {
-        auto password = read_till_end(f.in);
+    bool operator()(F &f, std::string password) override {
         if (check_password_pam(f.username, password, f)) {
             f.functions.erase("PASS");
             f.add_user_functions();
@@ -744,8 +732,12 @@ public:
 template <class F>
 class User : public Operation<F> {
 public:
-    bool operator()(F &f) override {
-        f.username = read_till_end(f.in);
+    bool operator()(F &f, std::string arg) override {
+        if (arg.empty()) {
+            SingleLine(f.out, 500) << "Expected name of user.";
+            return true;
+        }
+        f.username = std::move(arg);
         if (!f.settings.need_login) {
             SingleLine(f.out, 230) << "Success.";
             f.add_user_functions();
@@ -763,8 +755,7 @@ class StaticOperation : public Operation<F> {
 public:
     StaticOperation(int code_, std::string text_) : code(code_), text(std::move(text_)) { }
 
-    bool operator()(F &f) override {
-        read_till_end(f.in);
+    bool operator()(F &f, std::string arg) override {
         SingleLine(f.out, code) << text;
         return true;
     }
@@ -1013,24 +1004,35 @@ public:
             std::cerr << "Directory set initial failed\n";
             exit(1);
         }
+        if (rand() % 2 == 0) {
+            /// Kik out a lot of tests))))
+            SingleLine(out, 120) << "Wait a bit.";
+        }
         SingleLine(out, 220) << "Igor Mineev Server Ready.";
         std::string command;
         while (in >> command) {
             // Skip space after command;
+            bool is_end = true;
             if (in.peek() == ' ') {
                 in.get();
+                is_end = false;
+            }
+            auto arg = read_till_end(in);
+            if (is_end && !arg.empty()) {
+                SingleLine(out, 500) << "Bad command format.";
+                continue;
             }
             std::transform(command.begin(), command.end(), command.begin(),
                            [](unsigned char c){ return std::toupper(c); });
             try {
                 auto it = functions.find(command);
                 if (it != functions.end()) {
-                    if (!(*it->second)(*this)) {
+                    if (!(*it->second)(*this, std::move(arg))) {
                         break;
                     }
                     continue;
                 }
-                (*default_function)(*this);
+                (*default_function)(*this, std::move(arg));
             } catch (const std::exception &e) {
                 std::cerr << e.what() << std::endl;
                 break;

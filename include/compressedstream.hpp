@@ -39,8 +39,9 @@ protected:
         if (out_size_ == 1) {
             if (out_buf_[0] == c) {
                 ++out_repeat_;
-                if (out_repeat_ == (1u << 6u)) {
+                if (out_repeat_ == (1u << 6u) - 2) {
                     write_repeated();
+                    out_size_ = 0;
                 }
                 return;
             } else if (out_repeat_ != 0) {
@@ -103,7 +104,6 @@ protected:
             return;
         }
         auto descriptor = static_cast<unsigned>(static_cast<unsigned char>(static_cast<char>(descriptor2)));
-        std::cerr << descriptor << std::endl;
         if (descriptor == 0) {
             stream_->get();
             is_EOF = true;
@@ -136,6 +136,7 @@ protected:
                 in_buf_[in_size_++] = c;
                 --descriptor;
             }
+            return;
         }
         descriptor -= 0xC0u;
         while (descriptor > 0) {
@@ -203,7 +204,7 @@ protected:
 
 private:
     Stream *stream_;
-    std::array<char, BufMaxSize> in_buf_{};
+    std::array<unsigned char, BufMaxSize> in_buf_{};
     std::array<char, BufMaxSize> out_buf_{};
     int in_cur_ = 0, in_size_ = 0, out_size_ = 0;
     int out_repeat_ = 0;

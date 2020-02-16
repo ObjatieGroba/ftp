@@ -8,26 +8,43 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <sys/stat.h>
 
 #include "streams.hpp"
 #include "server.hpp"
 
 bool check_file_read_access(const std::string &filename) {
     int fd = open(filename.c_str(), O_RDONLY);
-    if (fd != -1) {
-        close(fd);
-        return true;
+    if (fd == -1) {
+        return false;
     }
-    return false;
+    close(fd);
+    struct stat st{};
+    if (stat(filename.c_str(), &st) != 0) {
+        return false;
+    }
+    if ((st.st_mode & S_IFDIR) != 0) {
+        /// It is directory
+        return false;
+    }
+    return true;
 }
 
 bool check_file_write_access(const std::string &filename, int mode=O_CREAT) {
     int fd = open(filename.c_str(), mode, 0600);
-    if (fd != -1) {
-        close(fd);
-        return true;
+    if (fd == -1) {
+        return false;
     }
-    return false;
+    close(fd);
+    struct stat st{};
+    if (stat(filename.c_str(), &st) != 0) {
+        return false;
+    }
+    if ((st.st_mode & S_IFDIR) != 0) {
+        /// It is directory
+        return false;
+    }
+    return true;
 }
 
 bool check_folder_exists_access(const std::string &filename) {
@@ -246,6 +263,9 @@ std::tuple<std::map<std::string, std::string>, bool> read_db(const std::optional
         std::getline(file, line);
         if (line.back() == '\n') {
             line.pop_back();
+        }
+        if (std::all_of(line.begin(), line.end(), [](char c) { return !isalnum(c); })) {
+            continue;
         }
         auto pos = line.find('\t');
         if (line.find('\t', pos + 1) != std::string::npos) {

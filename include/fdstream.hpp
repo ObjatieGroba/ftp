@@ -45,7 +45,6 @@ protected:
             res = send(fd_, out_buf_.data(), out_size_, 0);
         } while (res == -1 && errno == EINTR);
         if (res != out_size_) {
-            std::cerr << res << ' ' << errno << std::endl;
             throw std::runtime_error("Can not write to fd");
         }
         out_size_ = 0;
@@ -69,7 +68,6 @@ protected:
                     res = send(fd_, out_buf_.data(), out_size_, 0);
                 } while (res == -1 && errno == EINTR);
                 if (res != out_size_) {
-                    std::cerr << res << ' ' << errno << std::endl;
                     throw std::runtime_error("Can not write to fd");
                 }
                 out_size_ = 0;
@@ -96,7 +94,6 @@ protected:
                 } while (in_size_ == -1 && errno == EINTR);
                 in_cur_ = 0;
                 if (in_size_ == -1) {
-                    std::cerr << errno << std::endl;
                     throw std::runtime_error("Can not read from fd");
                 }
                 if (in_size_ == 0) {
@@ -121,7 +118,6 @@ protected:
         } while (in_size_ == -1 && errno == EINTR);
         in_cur_ = 0;
         if (in_size_ == -1) {
-            std::cerr << errno << std::endl;
             throw std::runtime_error("Can not read from fd");
         }
         if (in_size_ == 0) {
@@ -143,7 +139,6 @@ protected:
         } while (in_size_ == -1 && errno == EINTR);
         in_cur_ = 0;
         if (in_size_ == -1) {
-            std::cerr << errno << std::endl;
             throw std::runtime_error("Can not read from fd");
         }
         if (in_size_ == 0) {
@@ -165,7 +160,7 @@ private:
     bool need_close = true;
     int in_cur_ = 0, in_size_ = 0, out_size_ = 0;
 
-    std::array<char, BUF_SIZE> in_buf_{};
+    std::array<unsigned char, BUF_SIZE> in_buf_{};
     std::array<char, BUF_SIZE> out_buf_{};
 };
 

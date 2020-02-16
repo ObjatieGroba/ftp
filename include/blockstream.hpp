@@ -21,8 +21,8 @@ public:
 protected:
     void write_block(char descriptor = 64) {
         *stream_ << descriptor;
-        *stream_ << static_cast<char>(static_cast<unsigned>(out_size_) >> 8u);
-        *stream_ << static_cast<char>(out_size_ % 0xFFu);
+        *stream_ << static_cast<unsigned char>(static_cast<unsigned>(out_size_) >> 8u);
+        *stream_ << static_cast<unsigned char>(out_size_ % 0x100u);
         if (out_size_ != 0) {
             std::copy(out_buf_.begin(), out_buf_.begin() + out_size_, std::ostreambuf_iterator<char>(*stream_));
         }
@@ -143,7 +143,7 @@ protected:
 
 private:
     Stream *stream_;
-    std::array<char, BufMaxSize> in_buf_{};
+    std::array<unsigned char, BufMaxSize> in_buf_{};
     std::array<char, BufMaxSize> out_buf_{};
     int in_cur_ = 0, in_size_ = 0, out_size_ = 0;
     bool is_EOF = false;
