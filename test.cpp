@@ -379,8 +379,6 @@ public:
             test("Common")
             open_server_auth("anonymous", "anonymous")
 
-            test_run( client.run("sleep"))
-
             test_run( client.run("TYPE", true, "A"))
             req_code(200)
             test_run( client.run("MODE", true, "S"))
