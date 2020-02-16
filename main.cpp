@@ -590,7 +590,6 @@ public:
     }
 
     bool process(FDOStream &control, int fd, ModeType mode) override {
-        std::this_thread::sleep_for(std::chrono::seconds(11));
         bool result;
         if (mode == ModeType::Stream) {
             FDIStream in(fd);
