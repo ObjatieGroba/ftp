@@ -1017,7 +1017,7 @@ public:
             test("PASV")
             open_server_auth("anonymous", "anonymous")
 
-            const std::string filename = "test_file_001";
+            const std::string filename = "test_file_passive_001";
 
             /// Simple write + read
             const std::string text = "abcdefghi\n";
@@ -1114,15 +1114,15 @@ public:
 
 class AuthTest : public Test {
 public:
-    AuthTest(std::optional<std::string> users, std::string myip, unsigned ip, unsigned port)
-        : Test(std::move(myip), ip, port) {
+    AuthTest(std::optional<std::string> users_, std::string myip, unsigned ip, unsigned port)
+        : users(users_), Test(std::move(myip), ip, port) {
+    }
+
+    bool operator()(bool enable_output) const final {
         if (!users) {
             throw std::runtime_error("No file with passes");
         }
         passes = std::get<0>(read_db(users, {}));
-    }
-
-    bool operator()(bool enable_output) const final {
         {
             test("All login")
             open_server_auth("anonymous", "anonymous")
@@ -1189,7 +1189,8 @@ public:
         return true;
     }
 
-    std::map<std::string, std::string> passes;
+    mutable std::map<std::string, std::string> passes;
+    std::optional<std::string> users;
 };
 
 
@@ -1566,6 +1567,10 @@ int main() {
         while (isspace(myip.back())) {
             myip.pop_back();
         }
+    }
+
+    if (enable_output) {
+        std::cerr << shost << std::endl;
     }
 
     unsigned ip = htonl(inet_addr(shost.c_str()));
