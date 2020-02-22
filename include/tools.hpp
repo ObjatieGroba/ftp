@@ -3,6 +3,7 @@
 
 #include <array>
 #include <map>
+#include <vector>
 
 #include <unistd.h>
 #include <fcntl.h>
