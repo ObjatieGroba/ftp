@@ -198,28 +198,53 @@ public:
             SingleLine(f.out, 501) << "Arguments not expected.";
             return true;
         }
-        chdir("..");
-        SingleLine(f.out, 200) << "OK.";
-        return true;
-    }
-};
-
-template <class F>
-class CWD : public Operation<F> {
-public:
-    bool operator()(F &f, std::string arg) override {
-        path = std::move(arg);
-        if (path.empty()) {
-            SingleLine(f.out, 501) << "Path should be specified.";
-            return true;
-        }
+        full_working_path = f.settings.full_working_path;
         int status;
         if (!f.run_without_data_connect(this, &status)) {
             SingleLine(f.out, 421) << "Internal error";
             return true;
         }
         if (status != 0) {
-            SingleLine(f.out, 550) << "Incorrect path.";
+            SingleLine(f.out, 550) << "No access.";
+            return true;
+        }
+        chdir("..");
+        SingleLine(f.out, 200) << "OK.";
+        return true;
+    }
+
+
+    bool process(FDOStream&, int, ModeType) override {
+        /// Kostyil'. Checking that has access by uid
+        if (!check_folder_exists_access("..", full_working_path)) {
+            exit(1);
+        }
+        if (chdir("..") != 0) {
+            exit(1);
+        }
+        exit(0);
+    }
+
+    std::string full_working_path;
+};
+
+template <class F>
+class CWD : public Operation<F> {
+public:
+    bool operator()(F &f, std::string arg) override {
+        path = f.fix_abs_path(std::move(arg));
+        if (path.empty()) {
+            SingleLine(f.out, 501) << "Path should be specified.";
+            return true;
+        }
+        full_working_path = f.settings.full_working_path;
+        int status;
+        if (!f.run_without_data_connect(this, &status)) {
+            SingleLine(f.out, 421) << "Internal error";
+            return true;
+        }
+        if (status != 0) {
+            SingleLine(f.out, 550) << "No access.";
             return true;
         }
         if (chdir(path.c_str()) != 0) {
@@ -232,6 +257,9 @@ public:
 
     bool process(FDOStream&, int, ModeType) override {
         /// Kostyil'. Checking that has access by uid
+        if (!check_folder_exists_access(path, full_working_path)) {
+            exit(1);
+        }
         if (chdir(path.c_str()) != 0) {
             exit(1);
         }
@@ -239,17 +267,19 @@ public:
     }
 
     std::string path;
+    std::string full_working_path;
 };
 
 template <class F>
 class RMD : public Operation<F> {
 public:
     bool operator()(F &f, std::string arg) override {
-        path = std::move(arg);
+        path = f.fix_abs_path(std::move(arg));
         if (path.empty()) {
             SingleLine(f.out, 501) << "Path should be specified.";
             return true;
         }
+        working_directory = f.settings.full_working_path;
         if (!f.run_without_data_connect(this)) {
             SingleLine(f.out, 421) << "Internal error";
             return true;
@@ -258,7 +288,7 @@ public:
     }
 
     bool process(FDOStream &out, int, ModeType) override {
-        if (!check_folder_exists_access(path)) {
+        if (!check_folder_exists_access(path, working_directory)) {
             SingleLine(out, 550) << "Incorrect path.";
             return true;
         }
@@ -269,17 +299,19 @@ public:
     }
 
     std::string path;
+    std::string working_directory;
 };
 
 template <class F>
 class MKD : public Operation<F> {
 public:
     bool operator()(F &f, std::string arg) override {
-        path = std::move(arg);
+        path = f.fix_abs_path(std::move(arg));
         if (path.empty()) {
             SingleLine(f.out, 501) << "Path should be specified.";
             return true;
         }
+        working_directory = f.settings.full_working_path;
         if (!f.run_without_data_connect(this)) {
             SingleLine(f.out, 421) << "Internal error";
             return true;
@@ -288,7 +320,7 @@ public:
     }
 
     bool process(FDOStream &out, int, ModeType) override {
-        if (check_folder_exists_access(path)) {
+        if (check_folder_exists_access(path, working_directory)) {
             SingleLine(out, 550) << "Path already exists.";
             return true;
         }
@@ -301,17 +333,19 @@ public:
     }
 
     std::string path;
+    std::string working_directory;
 };
 
 template <class F>
 class Dele : public Operation<F> {
 public:
     bool operator()(F &f, std::string arg) override {
-        path = std::move(arg);
+        path = f.fix_abs_path(std::move(arg));
         if (path.empty()) {
             SingleLine(f.out, 501) << "Path should be specified.";
             return true;
         }
+        working_directory = f.settings.full_working_path;
         if (!f.run_without_data_connect(this)) {
             SingleLine(f.out, 421) << "Internal error";
             return true;
@@ -320,11 +354,7 @@ public:
     }
 
     bool process(FDOStream &out, int, ModeType) override {
-        if (!check_file_read_access(path)) {
-            SingleLine(out, 550) << "Incorrect path.";
-            return true;
-        }
-        if (!check_file_write_access(path)) {
+        if (!check_file_write_access(path, working_directory)) {
             SingleLine(out, 550) << "Incorrect path.";
             return true;
         }
@@ -335,6 +365,7 @@ public:
     }
 
     std::string path;
+    std::string working_directory;
 };
 
 template <class F>
@@ -472,11 +503,11 @@ public:
     }
 
     bool operator()(F &f, std::string arg) override {
-        path = std::move(arg);
+        path = f.fix_abs_path(std::move(arg));
         if (!f.check_data_connect()) {
             return true;
         }
-        if (!check_folder_exists_access(path.empty() ? "." : path)) {
+        if (!check_folder_exists_access(path.empty() ? "." : path, f.settings.full_working_path)) {
             SingleLine(f.out, 450) << "No such folder.";
             return true;
         }
@@ -518,7 +549,7 @@ template <class F>
 class Retr : public Operation<F> {
 public:
     bool operator()(F &f, std::string arg) override {
-        path = std::move(arg);
+        path = f.fix_abs_path(std::move(arg));
         if (!f.check_data_connect()) {
             return true;
         }
@@ -526,7 +557,7 @@ public:
             SingleLine(f.out, 501) << "Path should be specified.";
             return true;
         }
-        if (!check_file_read_access(path)) {
+        if (!check_file_read_access(path, f.settings.full_working_path)) {
             SingleLine(f.out, 550) << "No access.";
             return true;
         }
@@ -567,7 +598,7 @@ public:
     explicit Stor(int mode = O_CREAT) : filemode(mode) { }
 
     bool operator()(F &f, std::string arg) override {
-        path = std::move(arg);
+        path = f.fix_abs_path(std::move(arg));
         if (!f.check_data_connect()) {
             return true;
         }
@@ -575,7 +606,7 @@ public:
             SingleLine(f.out, 501) << "Path should be specified.";
             return true;
         }
-        if (!check_file_write_access(path, filemode)) {
+        if (!check_file_write_access(path, f.settings.full_working_path, filemode)) {
             SingleLine(f.out, 550) << "No access.";
             return true;
         }
@@ -904,7 +935,7 @@ public:
 class FTP {
 public:
     struct Settings {
-        std::string default_dir;
+        std::string full_working_path;
         std::string bind_host;
         std::map<std::string, std::string> passes;
         bool need_login;
@@ -949,6 +980,13 @@ public:
         functions["SLEEP"] = std::make_unique<Sleep<FTP>>();
 
         default_function = std::make_unique<StaticOperation<FTP>>(502, "No such command.");
+    }
+
+    std::string fix_abs_path(std::string path) {
+        if (path.empty() || path[0] != '/') {
+            return std::move(path);
+        }
+        return settings.full_working_path + path;
     }
 
     void set_clear_functions() {
@@ -999,12 +1037,11 @@ public:
     std::unique_ptr<Operation<FTP>> default_function;
 
     void run() {
-        if (chdir(settings.default_dir.c_str()) != 0) {
+        if (chdir(settings.full_working_path.c_str()) != 0) {
             std::cerr << "Directory set initial failed\n";
             exit(1);
         }
         if (rand() % 2 == 0) {
-            /// Kik out a lot of tests))))
             SingleLine(out, 120) << "Wait a bit.";
         }
         SingleLine(out, 220) << "Igor Mineev Server Ready.";
@@ -1054,12 +1091,30 @@ public:
 
 void empty(int /*signum*/) { }
 
+std::string get_full_path(const std::string &path) {
+#ifdef PATH_MAX
+    auto path_max = PATH_MAX;
+#else
+    auto path_max = pathconf(path.c_str(), _PC_PATH_MAX);
+    if (path_max <= 0) {
+        path_max = 4096;
+    }
+#endif
+    std::vector<char> buf(path_max + 1);
+    char *full_path = realpath(path.c_str(), buf.data());
+    if (full_path == nullptr) {
+        /// Can not check path
+        return {};
+    }
+    return {full_path};
+}
+
 int main() {
     signal(SIGPIPE, empty);
 
     FTP::Settings settings{};
 
-    settings.default_dir = parse_env_req("HW1_DIRECTORY");
+    settings.full_working_path = get_full_path(parse_env_req("HW1_DIRECTORY"));
     auto user_passes = parse_env("HW1_USERS");
     settings.bind_host = parse_env_req("HW1_HOST");
     auto bind_port = parse_env_req("HW1_PORT");
@@ -1069,8 +1124,9 @@ int main() {
     settings.passes = std::move(passes);
     settings.need_login = need_login;
 
-    if (!check_folder_exists_access(settings.default_dir)) {
-        std::cerr << "No such dir " << settings.default_dir << std::endl;
+    if (settings.full_working_path.empty() ||
+        !check_folder_exists_access(settings.full_working_path, settings.full_working_path)) {
+        std::cerr << "No access to dir " << settings.full_working_path << std::endl;
         return 1;
     }
 

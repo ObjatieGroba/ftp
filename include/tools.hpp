@@ -13,7 +13,25 @@
 #include "streams.hpp"
 #include "server.hpp"
 
-bool check_file_read_access(const std::string &filename) {
+bool check_working_directory(const std::string &filename, const std::string &full_working_path) {
+#ifdef PATH_MAX
+    auto path_max = PATH_MAX;
+#else
+    auto path_max = pathconf(filename.c_str(), _PC_PATH_MAX);
+    if (path_max <= 0) {
+        path_max = 4096;
+    }
+#endif
+    std::vector<char> buf(path_max + 1);
+    char *full_path = realpath(filename.c_str(), buf.data());
+    if (full_path == nullptr) {
+        /// Can not check path
+        return false;
+    }
+    return strncmp(full_path, full_working_path.c_str(), full_working_path.size()) == 0;
+}
+
+bool check_file_read_access(const std::string &filename, const std::string &full_working_path) {
     int fd = open(filename.c_str(), O_RDONLY);
     if (fd == -1) {
         return false;
@@ -27,10 +45,10 @@ bool check_file_read_access(const std::string &filename) {
         /// It is directory
         return false;
     }
-    return true;
+    return check_working_directory(filename, full_working_path);
 }
 
-bool check_file_write_access(const std::string &filename, int mode=O_CREAT) {
+bool check_file_write_access(const std::string &filename, const std::string &full_working_path, int mode=O_CREAT) {
     int fd = open(filename.c_str(), mode, 0600);
     if (fd == -1) {
         return false;
@@ -44,16 +62,16 @@ bool check_file_write_access(const std::string &filename, int mode=O_CREAT) {
         /// It is directory
         return false;
     }
-    return true;
+    return check_working_directory(filename, full_working_path);
 }
 
-bool check_folder_exists_access(const std::string &filename) {
+bool check_folder_exists_access(const std::string &filename, const std::string &full_working_path) {
     int fd = open(filename.c_str(), O_RDONLY | O_DIRECTORY);
-    if (fd != -1) {
-        close(fd);
-        return true;
+    if (fd < 0) {
+        return false;
     }
-    return false;
+    close(fd);
+    return check_working_directory(filename, full_working_path);
 }
 
 int open_connection(unsigned ip, unsigned port) {

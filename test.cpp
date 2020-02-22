@@ -948,6 +948,39 @@ public:
                 }
             }
         }
+        {
+            test("Dir cwd and abs path")
+            open_server_auth("anonymous", "anonymous")
+            const std::string dirname = "dir";
+            test_run(client.run("RMD", true, dirname))
+            req_code(250, 550)
+            test_run(client.run("MKD", true, dirname))
+            req_code(257)
+            test_run(client.run("MKD", true, dirname))
+            req_code(450, 550)
+
+            test_run(client.run("cdup", true))
+            req_code(550)
+
+            test_run(client.run("cwd", true, dirname))
+            req_code(250)
+            test_run(client.run("cdup", true))
+            req_code(200)
+
+            test_run(client.run("cwd", true, "/" + dirname))
+            req_code(250)
+            test_run(client.run("cdup", true))
+            req_code(200)
+
+            test_run(client.run("rmd", true, ".."))
+            req_code(550)
+
+            test_run(client.run("rmd", true, "/tmp"))
+            req_code(550)
+
+            test_run(client.run("rmd", true, "dir/../dir/../.."))
+            req_code(550)
+        }
         return true;
     }
 };
@@ -1559,30 +1592,16 @@ int main() {
     auto users = parse_env("HW1_USERS");
     bool enable_output = !quiet || (quiet.value() != "1");
 
-    std::string myip;
-    {
-        std::ostringstream ss;
-        run_command("ip route get " + shost + " | python3 -c \"print(input().split()[-3])\"", ss);
-        myip = ss.str();
-        while (isspace(myip.back())) {
-            myip.pop_back();
-        }
-    }
-
-    if (enable_output) {
-        std::cerr << shost << std::endl;
-    }
-
     unsigned ip = htonl(inet_addr(shost.c_str()));
     unsigned port = strtoul(sport.c_str(), nullptr, 10);
 
     std::map<std::string, std::unique_ptr<Test>> tests;
-    tests["minimal"] = std::make_unique<MinimalTest>(myip, ip, port);
-    tests["dir"] = std::make_unique<DirTest>(myip, ip, port);
-    tests["passive"] = std::make_unique<PassiveTest>(myip, ip, port);
-    tests["trans-mode-block"] = std::make_unique<ModeBlockTest>(myip, ip, port);
-    tests["trans-mode-compressed"] = std::make_unique<ModeCompressedTest>(myip, ip, port);
-    tests["auth"] = std::make_unique<AuthTest>(users, myip, ip, port);
+    tests["minimal"] = std::make_unique<MinimalTest>(shost, ip, port);
+    tests["dir"] = std::make_unique<DirTest>(shost, ip, port);
+    tests["passive"] = std::make_unique<PassiveTest>(shost, ip, port);
+    tests["trans-mode-block"] = std::make_unique<ModeBlockTest>(shost, ip, port);
+    tests["trans-mode-compressed"] = std::make_unique<ModeCompressedTest>(shost, ip, port);
+    tests["auth"] = std::make_unique<AuthTest>(users, shost, ip, port);
 
     if (test) {
         const auto &ptest = tests[test.value()];
