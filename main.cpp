@@ -3,7 +3,7 @@
 #include <vector>
 #include <cstring>
 #include <algorithm>
-#include <math.h>
+#include <cmath>
 
 struct Edge {
     double weight;
@@ -18,7 +18,7 @@ struct Edge {
 class Graph {
 public:
     Graph(unsigned vertexes_, std::vector<Edge> edges) : edges_(std::move(edges)),
-                                                         idxs_(vertexes_ + 1),
+                                                         ids_(vertexes_ + 1),
                                                          vertexes(vertexes_) {
         std::sort(edges_.begin(), edges_.end());
         unsigned cur = 0;
@@ -26,12 +26,12 @@ public:
             while (cur != edges_.size() && edges_[cur].from == vid) {
                 ++cur;
             }
-            idxs_[vid + 1] = cur;
+            ids_[vid + 1] = cur;
         }
     }
 
     auto getEdges(unsigned vertex) const {
-        return edges_.begin() + idxs_[vertex];
+        return edges_.begin() + ids_[vertex];
     }
 
     const auto& getEdges() const {
@@ -88,7 +88,7 @@ public:
 
 private:
     std::vector<Edge> edges_;
-    std::vector<unsigned> idxs_;
+    std::vector<unsigned> ids_;
 
 public:
     unsigned vertexes;
@@ -122,9 +122,9 @@ public:
 
 struct Node {
     std::string label;
-    double lon;
-    double lat;
-    unsigned id;
+    double lon{};
+    double lat{};
+    unsigned id{};
 };
 
 bool strip_cmp(std::string s, std::string pattern) {
@@ -162,7 +162,7 @@ double calc_distance(const Node &f, const Node &s) {
                cos(lat_f_rad) * cos(lat_s_rad);
     constexpr auto kRad = 6371;
     double c = 2 * asin(sqrt(a));
-    return abs(kRad * c);
+    return std::abs(kRad * c);
 }
 
 int main(int argc, char ** argv) {
@@ -246,8 +246,8 @@ int main(int argc, char ** argv) {
             nodes[node.id] = std::move(node);
         } else if (strip_cmp(line, "edge [")) {
             while (strip_cmp(line, "edge [")) {
-                unsigned from;
-                unsigned to;
+                unsigned from{};
+                unsigned to{};
                 in >> label;
                 while (!strip_cmp(label, "]")) {
                     if (label == "target") {
