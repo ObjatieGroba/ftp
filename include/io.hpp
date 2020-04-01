@@ -3,7 +3,9 @@
 
 #include <vector>
 #include <functional>
+#include <memory>
 #include <map>
+#include <unistd.h>
 #include <sys/epoll.h>
 
 #include "scope_guard.hpp"
@@ -143,6 +145,13 @@ public:
       return;
     }
     write_buf_ += buf;
+  }
+
+  void write(char c) {
+    if (stopped) {
+      return;
+    }
+    write_buf_.push_back(c);
   }
 
   bool sync() {

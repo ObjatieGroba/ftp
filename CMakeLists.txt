@@ -10,3 +10,5 @@ add_executable(server ${FTP_SERVER_SOURCES})
 
 FILE(GLOB FTP_CLIENT_SOURCES client.cpp)
 add_executable(client ${FTP_CLIENT_SOURCES})
+
+target_link_libraries(client curses)

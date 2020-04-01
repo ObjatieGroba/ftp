@@ -23,7 +23,7 @@ public:
 
   void run() {
     read(buf.data(), buf.size());
-    start(id, std::dynamic_pointer_cast<Client>(this->shared_from_this()));
+    ::start(id, std::dynamic_pointer_cast<Client>(this->shared_from_this()));
   }
 
   void on_read(const char *, size_t size) final {
@@ -70,7 +70,6 @@ private:
   }
 
   std::array<char, 1024> buf;
-  std::string write_buf;
   size_t read_from = 0;
   size_t read_to = 0;
 
@@ -241,7 +240,7 @@ size_t process(size_t client_id, std::string_view buf) {
     }
   }
   if (i == buf.size()) {
-    /// Not full command. Command mast ends with \n
+    /// Not full command. Command ends with \n
     return 0;
   }
   std::string_view command = buf.substr(0, i);
@@ -299,6 +298,10 @@ size_t process(size_t client_id, std::string_view buf) {
     auto it = login_to_id.find(info.new_login);
     if (it != login_to_id.end()) {
       info.conn->write("User already exists\n");
+      return command.size() + 1;
+    }
+    if (info.new_login.size() > 10) {
+      info.conn->write("Username is too long (>10 chars)\n");
       return command.size() + 1;
     }
     auto x = rand() % 100;
@@ -374,17 +377,24 @@ size_t process(size_t client_id, std::string_view buf) {
         info.conn->write("Wait cooldown " + std::to_string(60 - now + all_users[user_id].last_write) + " seconds\n");
         return command.size() + 1;
       }
-      all_users[user_id].last_write = now;
-      if (ss.peek() == ' ') {
-        ss.ignore();
-        if (!all_users[user_id].banned || all_users[user_id].admin) { /// Black ban
-          char c = board[i * kWidth + j] = ss.peek();
-          broadcast(client_id, "set " + std::to_string(i) + " " +
-                                   std::to_string(j) + " " + c + '\n');
-        }
-        info.conn->write("Ok\n");
+      if (ss.peek() != ' ') {
+        info.conn->write("Bad format\n");
         return command.size() + 1;
       }
+      ss.ignore();
+      char c = ss.peek();
+      if (!isprint(c) || c == '\n' || c == '\r') {
+        info.conn->write("Unsupported character\n");
+        return command.size() + 1;
+      }
+      all_users[user_id].last_write = now;
+      if (!all_users[user_id].banned || all_users[user_id].admin) { /// Black ban
+        board[i * kWidth + j] = c;
+        broadcast(client_id, "set " + std::to_string(i) + " " +
+                             std::to_string(j) + " " + c + '\n');
+      }
+      info.conn->write("Ok\n");
+      return command.size() + 1;
     }
     info.conn->write("Syntax error\n");
   } else if (command.substr(0, 4) == "ban " && all_users[user_id].admin) {
@@ -431,10 +441,10 @@ void fail(size_t client_id) {
 
 
 void help() {
-  std::cout << "Usage: ./server host port\n" <<
+  std::cout << "Usage: ./server host port\n"
       "  Optional arguments:\n"
-      "    --board filename   - file for board"
-      "    --users filename   - file for accounts information";
+      "    --board filename   - file for board\n"
+      "    --users filename   - file for accounts information\n";
   exit(0);
 }
 
