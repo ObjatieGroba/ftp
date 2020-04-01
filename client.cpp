@@ -3,8 +3,6 @@
 #include <netinet/in.h>
 #include <sstream>
 #include <sys/fcntl.h>
-#include <curses.h>
-#include <term.h>
 
 #include "io.hpp"
 #include "tools.hpp"
@@ -14,9 +12,7 @@ size_t process_console_command(std::string_view buf);
 
 class AsyncAPI : public IO::BufferedHandler {
 public:
-  AsyncAPI(IO::Context* io, int fd) : IO::BufferedHandler(io, fd) {
-
-  }
+  AsyncAPI(IO::Context* io, int fd) : IO::BufferedHandler(io, fd) { }
 
   void run() {
     write("subscribe\n");
@@ -83,7 +79,6 @@ public:
     int fd_out = fileno(stdout);
     int out_flags = fcntl(fd_out, F_GETFL, 0);
     fcntl(fd_out, F_SETFL, out_flags | O_NONBLOCK);
-    // setupterm(nullptr, STDOUT_FILENO, nullptr);
   }
 
   void run() {
@@ -279,29 +274,6 @@ size_t process_console_command(std::string_view buf) {
   if (i == buf.size()) {
     /// Not full command. Command ends with \n
     return 0;
-  }
-  auto command = buf.substr(0, i);
-  if (command.substr(0, 4) == "set ") {
-    std::istringstream ss(std::string(command.substr(4)));
-    unsigned i;
-    unsigned j;
-    if ((ss >> i) && (ss >> j)) {
-      if (i >= kHeight && j >= kWidth) {
-        // Out of range
-        return command.size() + 1;
-      }
-      if (ss.peek() != ' ') {
-        // Bad format
-        return command.size() + 1;
-      }
-      ss.ignore();
-      char c = ss.peek();
-      if (!isprint(c) || c == '\n' || c == '\r') {
-        // Unsupported character
-        return command.size() + 1;
-      }
-      board[i * kWidth + j] = c;
-    }
   }
   api->write(buf.substr(0, i + 1));
   api->sync();

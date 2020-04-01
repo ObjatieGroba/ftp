@@ -208,12 +208,11 @@ void load_users() {
 
 void broadcast(unsigned self_id, std::string_view msg, bool force = false) {
   for (auto && [id, client] : current_users) {
-    if (id == self_id) {
-      continue;
-    }
     if (client.isSubscribed || force) {
       client.conn->write(msg);
-      client.conn->sync();
+      if (id != self_id) {
+        client.conn->sync();
+      }
     }
   }
 }
