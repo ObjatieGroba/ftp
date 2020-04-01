@@ -120,7 +120,9 @@ public:
       if (write_buf_.size() == to_write_from_) {
         write_buf_.clear();
         to_write_from_ = 0;
-        on_write();
+        if (!stopped) {
+          on_write();
+        }
       }
       return;
     }
@@ -134,7 +136,9 @@ public:
         std::cerr << "Can not read from client " << fd_in_ << std::endl;
         return fail();
       }
-      on_read(read_buf_, rd);
+      if (!stopped) {
+        on_read(read_buf_, rd);
+      }
     } else {
       std::cerr << "Incorrect event: " << ev.events << "; to_write: " << write_buf_.size() - to_write_from_ << std::endl;
     }
@@ -155,9 +159,6 @@ public:
   }
 
   bool sync() {
-    if (stopped) {
-      return false;
-    }
     if (write_buf_.empty()) {
       return false;
     }
@@ -169,7 +170,9 @@ public:
     if (write_buf_.size() == to_write_from_) {
       write_buf_.clear();
       to_write_from_ = 0;
-      on_write();
+      if (!stopped) {
+        on_write();
+      }
     } else if (last_event_ != EPOLLOUT) {
       bool err = false;
       if (fd_in_ != fd_out_) {

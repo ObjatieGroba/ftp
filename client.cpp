@@ -146,7 +146,7 @@ unsigned console_width = 70;
 std::string last_response;
 std::vector<std::string> active_users;
 
-void drow_board() {
+void drow_board(bool clear_user_input) {
   console->write("\033[1;1H");
   for (int i = 0; i != kWidth * kHeight; i += kWidth) {
     for (int j = 0; j != kWidth; ++j) {
@@ -175,10 +175,12 @@ void drow_board() {
     console->write(' ');
   }
   console->write('\n');
-  for (int j = 0; j < console_width; ++j) {
-    console->write(' ');
+  if (clear_user_input) {
+    for (int j = 0; j < console_width; ++j) {
+      console->write(' ');
+    }
+    console->write('\r');
   }
-  console->write('\r');
 }
 
 size_t process_api_response(std::string_view buf) {
@@ -255,7 +257,7 @@ size_t process_api_response(std::string_view buf) {
   } else {
     last_response = command;
   }
-  drow_board();
+  drow_board(false);
   console->sync();
   return command.size() + 1;
 }
@@ -277,7 +279,7 @@ size_t process_console_command(std::string_view buf) {
   }
   api->write(buf.substr(0, i + 1));
   api->sync();
-  drow_board();
+  drow_board(true);
   return i + 1;
 }
 

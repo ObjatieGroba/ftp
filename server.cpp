@@ -255,14 +255,16 @@ size_t process(size_t client_id, std::string_view buf) {
       return command.size() + 1;
     }
     command = "exit";
+    info.conn->write("Bad capcha\n");
   }
 
   if (command == "exit") {
     std::string msg = "logout "; msg += all_users[user_id].login; msg += '\n';
     broadcast(client_id, msg);
-    info.conn->stop();
-    current_users.erase(client_id);
     info.conn->write("Bie\n");
+    info.conn->stop();
+    info.conn->sync();
+    current_users.erase(client_id);
     return 0;
   } else if (command == "get board") {
     info.conn->write("board: ");
@@ -306,8 +308,8 @@ size_t process(size_t client_id, std::string_view buf) {
     auto x = rand() % 100;
     auto y = rand() % 100;
     std::string capcha = std::to_string(x) + " + " + std::to_string(y);
-    info.capcha_answer = std::to_string(x + y);
-    info.conn->write("Please write answer of " + capcha + "\n");
+    info.capcha_answer = "capcha " + std::to_string(x + y);
+    info.conn->write("capcha: Please write answer of " + capcha + " with capcha command\n");
   } else if (command.substr(0, 5) == "vote ") {
     if (user_id == Anonymous) {
       info.conn->write("Only logged in users can vote\n");
